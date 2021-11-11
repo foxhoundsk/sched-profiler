@@ -22,12 +22,6 @@ struct {
  * monitor whether the backlog is big enough. (BPF ringbuf uses a lightweight.
  * spinlock internally, can we keep up with this in sched code path?)
  *
- * IF WE CANT, SIMPLY FILTER OUT THE OUTLIER. or split the rb into 2 rb.
- *
- * @total_event
- *
- * counts how many times our hooks triggered.
- *
  * btw, should we align up to 128 bytes instead of 64 bytes to prevent
  * false-sharing?
  */
@@ -36,7 +30,7 @@ unsigned long dropped __attribute__((aligned(128))) = 0;
 
 /*
  * hook location:
- * https://elixir.bootlin.com/linux/v5.14/source/kernel/sched/fair.c#L9804
+ * https://elixir.bootlin.com/linux/v5.14/source/kernel/sched/fair.c#L9973
  */
 SEC("sched/cfs_trigger_load_balance_start")
 int BPF_PROG(lb_start)
@@ -68,9 +62,7 @@ int BPF_PROG(lb_start)
 
 /*
  * hook location:
- * https://elixir.bootlin.com/linux/v5.14/source/kernel/sched/fair.c#L9974
- *
- * At this point, we won't encounter task==RETRY_TASK, hence no check required.
+ * https://elixir.bootlin.com/linux/v5.14/source/kernel/sched/fair.c#L9734
  */
 SEC("sched/cfs_trigger_load_balance_end")
 int BPF_PROG(lb_end)
