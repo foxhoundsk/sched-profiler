@@ -62,9 +62,7 @@ static int handle_event(void *ctx, void *data, size_t size)
 static void report_result(void)
 {
     int orphan_event = 0;
-fprintf(stderr, "%ld %ld\n", res.enq[0].time_ns, res.deq[0].time_ns);
-fprintf(stderr, "%d %d %d\n", res.enq[0].smp_cpu, res.enq[1].smp_cpu, res.enq[2].smp_cpu);
-fprintf(stderr, "%d %d %d\n", res.deq[0].smp_cpu,  res.deq[1].smp_cpu, res.deq[2].smp_cpu);
+
     for (int i = 0; i < res.nr_enq_ev; i++) {
         for (int x = 0; x < res.nr_deq_ev; x++) {
             if (res.deq[x].smp_cpu & LB_END_EVENT_BIT || /* processed event */
