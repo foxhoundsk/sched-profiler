@@ -151,7 +151,9 @@ int main(int ac, char *av[])
         }
     }
     report_result();
-//printf("%d enq:%d deq:%d\n",err, res.nr_enq_ev, res.nr_deq_ev);
+    fprintf(stderr, "\ndone post processing, press enter to exit...");
+    getchar();
+
 cleanup:
     ring_buffer__free(rb);
     time_in_lb_bpf__destroy(skel);

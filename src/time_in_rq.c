@@ -181,6 +181,8 @@ int main(int ac, char *av[])
         }
     }
     report_result();
+    fprintf(stderr, "\ndone post processing, press enter to exit...");
+    getchar();
 
 cleanup:
     ring_buffer__free(rb);
