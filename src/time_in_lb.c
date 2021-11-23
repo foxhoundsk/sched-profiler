@@ -2,20 +2,22 @@
 #include <sys/resource.h>
 #include <errno.h>
 #include <signal.h>
+#include <unistd.h>
+#include <sys/sysinfo.h> /* nproc */
+#include <bpf/bpf.h>
 
 #include "common.h"
 #include "time_in_lb.skel.h"
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
-#define EVENT_SZ 65536 * 2
 
-static struct {
-    lb_event_t enq[EVENT_SZ]; /* 4MB */
-    lb_event_t deq[EVENT_SZ];
+struct result {
+    lb_event_t enq[EVENT_SZ / 2];
+    lb_event_t deq[EVENT_SZ / 2];
     int nr_enq_ev;
     int nr_deq_ev;
-} res = {};
+};
 
 static volatile bool exiting = false;
 static struct time_in_lb_bpf *skel;
@@ -36,56 +38,75 @@ static void bump_memlock_rlimit(void)
 static void sig_handler(int sig)
 {
     exiting = true;
+    fprintf(stderr, "SIGINT received, doing post-processing...");
 }
-
+/*
 static int handle_event(void *ctx, void *data, size_t size)
 {
     lb_event_t *e = data;
 
-    if (unlikely(res.nr_deq_ev == EVENT_SZ || res.nr_enq_ev == EVENT_SZ))
+    if (unlikely(res[c].nr_deq_ev == EVENT_SZ || res[c].nr_enq_ev == EVENT_SZ))
         return -EXFULL;
 
     if (e->smp_cpu & LB_END_EVENT_BIT) {
-        res.deq[res.nr_deq_ev] = *e;
-        /*
-         * move this op into the post processing if we can't keep up with the
-         * event rate.
-         */
-        res.deq[res.nr_deq_ev].smp_cpu &= ~LB_END_EVENT_BIT;
-        res.nr_deq_ev++;
+        res[c].deq[res[c].nr_deq_ev] = *e;
+        res[c].deq[res[c].nr_deq_ev].smp_cpu &= ~LB_END_EVENT_BIT;
+        res[c].nr_deq_ev++;
     } else
-        res.enq[res.nr_enq_ev++] = *e;
+        res[c].enq[res[c].nr_enq_ev++] = *e;
 
     return 0;
 }
+*/
+int nproc;
+struct lb_percpu_arr *map;
+struct result *res;
 
 static void report_result(void)
 {
-    int orphan_event = 0;
+    int orphan_event = 0, zero = 0, err;
 
-    for (int i = 0; i < res.nr_enq_ev; i++) {
-        for (int x = 0; x < res.nr_deq_ev; x++) {
-            if (res.deq[x].smp_cpu & LB_END_EVENT_BIT || /* processed event */
-                res.deq[x].smp_cpu != res.enq[i].smp_cpu)
-                continue;
+    err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.map), &zero, map);
+    if (err) {
+        fprintf(stderr, "Error lookup BPF map\n");
+        return;
+    }
+// IF RESULT IS WEIRD, TRY FLUSH CACHE WITH SYSTEM('ECHO ... > /SYS/CACHE....')
+    for (int c = 0; c < nproc; c++) {
+        for (int i = 0; i < map[c].idx; i++) {
+            if (map[c].e[i].time_ns & LB_END_EVENT_BIT) {
+                map[c].e[i].time_ns &= ~LB_END_EVENT_BIT;
+                res[c].deq[res[c].nr_deq_ev] = map[c].e[i];
+                res[c].nr_deq_ev++;
+            } else {
+                res[c].enq[res[c].nr_enq_ev] = map[c].e[i];
+                res[c].nr_enq_ev++;
+            }
+        }
 
-            long delta = res.deq[x].time_ns - res.enq[i].time_ns;
+        for (int i = 0; i < res[c].nr_enq_ev; i++) {
+            for (int x = 0; x < res[c].nr_deq_ev; x++) {
+                if (res[c].deq[x].time_ns & LB_END_EVENT_BIT) /* processed event */
+                    continue;
 
-            /*
-             * nearing the start or the end of profiling, or, the ringbuf can't
-             * keep up with the event rate, hence losing the corresponding
-             * event. Give up this event pair.
-             */
-            if (unlikely(delta < 0)) {
-                res.deq[x].smp_cpu |= LB_END_EVENT_BIT; /* mark as processed */
-                orphan_event++;
+                long delta = res[c].deq[x].time_ns - res[c].enq[i].time_ns;
+
+                /*
+                 * nearing the start or the end of profiling, or, the ringbuf can't
+                 * keep up with the event rate, hence losing the corresponding
+                 * event. Give up this event pair.
+                 */
+                if (unlikely(delta < 0)) {
+                    res[c].deq[x].time_ns |= LB_END_EVENT_BIT; /* mark as processed */
+                    orphan_event++;
+                    break;
+                }
+
+                res[c].deq[x].time_ns |= LB_END_EVENT_BIT;
+
+                printf("%ld\n", delta);
                 break;
             }
-
-            res.deq[x].smp_cpu |= LB_END_EVENT_BIT;
-
-            printf("%ld\n", delta);
-            break;
         }
     }
     /*
@@ -100,24 +121,52 @@ static void report_result(void)
 #endif
     fprintf(stderr, "captured %d event(s)\nenqueue event: %d, "
             "picked-up event: %d\norphan event: %d\n",
-            res.nr_enq_ev + res.nr_deq_ev,
-            res.nr_enq_ev,
-            res.nr_deq_ev,
+            res[0].nr_enq_ev + res[0].nr_deq_ev, // TODO make this percpu
+            res[0].nr_enq_ev,
+            res[0].nr_deq_ev,
             orphan_event);
 }
 
 int main(int ac, char *av[])
 {
-    struct ring_buffer *rb;
-    int err;
+    int err, map_fd, zero = 0;
 
     bump_memlock_rlimit();
 
-    skel = time_in_lb_bpf__open_and_load();
+    skel = time_in_lb_bpf__open();
     if (!skel) {
-        fprintf(stderr, "Failed to open and load BPF skeleton\n");
+        fprintf(stderr, "Failed to open BPF skeleton\n");
         return -1;
     }
+
+    nproc = get_nprocs_conf();
+    map = malloc(sizeof(*map) * nproc);
+    res = malloc(sizeof(*res) * nproc);
+    if (!map || !res) {
+        fprintf(stderr, "Failed to malloc\n");
+        return -1;
+    }
+    memset(res, 0, sizeof(*res) * nproc);
+    memset(map, 0, sizeof(*map) * nproc);
+
+    err = time_in_lb_bpf__load(skel);
+    if (err) {
+        fprintf(stderr, "Failed to load BPF program\n");
+        return -1;
+    }
+/*
+    map_fd = bpf_map__fd(skel->maps.map);
+    if (map_fd < 0) {
+        fprintf(stderr, "Failed to obtain map fd\n");
+        return -1;
+    }
+
+    err = bpf_map_update_elem(map_fd, &zero, map, BPF_NOEXIST);
+    if (err) {
+        fprintf(stderr, "Failed to update BPF map\n");
+        return -1;
+    }
+*/
 
     err = time_in_lb_bpf__attach(skel);
     if (err) {
@@ -125,37 +174,16 @@ int main(int ac, char *av[])
         goto cleanup;
     }
 
-    rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL, NULL);
-    if (!rb) {
-        err = -1;
-        fprintf(stderr, "Failed to create ring buffer\n");
-        goto cleanup;
-    }
-
     signal(SIGINT, sig_handler);
 
     while (!exiting) {
-        /* if not fast enough, use ring_buffer__consume() for busy reaping. */
-        err = ring_buffer__poll(rb, 100 /* timeout, ms */);
-        if (err == -EINTR) {
-            fprintf(stderr, "\nSIGINT received...\n\n");
-            err = 0;
-            break;
-        } else if (err == -EXFULL) {
-            err = 0;
-            break;
-        }
-        if (err < 0) {
-            fprintf(stderr, "Error polling ring buffer: %d\n", err);
-            goto cleanup;
-        }
+        sleep(1);
     }
     report_result();
     fprintf(stderr, "\ndone post processing, press enter to exit...");
     getchar();
 
 cleanup:
-    ring_buffer__free(rb);
     time_in_lb_bpf__destroy(skel);
 
     return err < 0 ? -err : 0;
