@@ -38,66 +38,76 @@ static void bump_memlock_rlimit(void)
 static void sig_handler(int sig)
 {
     exiting = true;
-    fprintf(stderr, "SIGINT received, doing post-processing...");
+    fprintf(stderr, "SIGINT received, doing post-processing...\n");
 }
-/*
-static int handle_event(void *ctx, void *data, size_t size)
-{
-    lb_event_t *e = data;
 
-    if (unlikely(res[c].nr_deq_ev == EVENT_SZ || res[c].nr_enq_ev == EVENT_SZ))
-        return -EXFULL;
-
-    if (e->smp_cpu & LB_END_EVENT_BIT) {
-        res[c].deq[res[c].nr_deq_ev] = *e;
-        res[c].deq[res[c].nr_deq_ev].smp_cpu &= ~LB_END_EVENT_BIT;
-        res[c].nr_deq_ev++;
-    } else
-        res[c].enq[res[c].nr_enq_ev++] = *e;
-
-    return 0;
-}
-*/
-int nproc;
-struct lb_percpu_arr *map;
-struct result *res;
+static int nproc;
 
 static void report_result(void)
 {
     int orphan_event = 0, zero = 0, err;
+    this_cpu_idx_t *this_cpu_idx;
+    lb_event_t *map;
+    struct result *res;
 
-    err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.map), &zero, map);
-    if (err) {
-        fprintf(stderr, "Error lookup BPF map\n");
+    res = malloc(sizeof(*res) * nproc);
+    this_cpu_idx = malloc(sizeof(*this_cpu_idx) * nproc);
+    map = malloc(sizeof(*map) * EVENT_SZ);
+    if (!this_cpu_idx || !map || !res) {
+        fprintf(stderr, "Failed to malloc\n");
         return;
     }
-// IF RESULT IS WEIRD, TRY FLUSH CACHE WITH SYSTEM('ECHO ... > /SYS/CACHE....')
+    memset(res, 0, sizeof(*res) * nproc);
+    err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.this_cpu_idx), &zero, this_cpu_idx);
+    if (err) {
+        fprintf(stderr, "Failed to lookup BPF map\n");
+        return;
+    }
+
     for (int c = 0; c < nproc; c++) {
-        for (int i = 0; i < map[c].idx; i++) {
-            if (map[c].e[i].time_ns & LB_END_EVENT_BIT) {
-                map[c].e[i].time_ns &= ~LB_END_EVENT_BIT;
-                res[c].deq[res[c].nr_deq_ev] = map[c].e[i];
-                res[c].nr_deq_ev++;
+        int idx = this_cpu_idx[c].nr_event;
+//fprintf(stderr, "cpu: %d idx: %d\n", c, idx);
+        err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.map), &c, map);
+        if (err) {
+            fprintf(stderr, "Failed to lookup BPF map\n");
+            return;
+        }
+        for (int i = 0; i < idx; i++) {
+fprintf(stderr, "processing ns: %ld\n", map[i].time_ns);
+            if (map[i].time_ns & LB_END_EVENT_BIT) {
+                res[c].deq[res[c].nr_deq_ev++].time_ns = map[i].time_ns &
+                                                         ~LB_END_EVENT_BIT;
+//fprintf(stderr, "WWWW\n");
             } else {
-                res[c].enq[res[c].nr_enq_ev] = map[c].e[i];
-                res[c].nr_enq_ev++;
+                res[c].enq[res[c].nr_enq_ev++] = map[i];
             }
         }
-
+//fprintf(stderr, "this cpu nr_enq: %d\n", res[c].nr_enq_ev);
+/*
+fprintf(stderr, "nr_deq_ev: %d %ld\n", res[c].nr_deq_ev, res[c].deq[0].time_ns);
+fprintf(stderr, "nr_enq_ev: %d %ld\n", res[c].nr_enq_ev, res[c].enq[0].time_ns);*/
         for (int i = 0; i < res[c].nr_enq_ev; i++) {
+            /* TODO
+             * by using percpu_array, we can start from previous event, instead
+             * of the first event, since it's not possible that the event pair
+             * can interleave with each other (i.e. the SMP stuff).
+             */
             for (int x = 0; x < res[c].nr_deq_ev; x++) {
-                if (res[c].deq[x].time_ns & LB_END_EVENT_BIT) /* processed event */
+                if (res[c].deq[x].time_ns & LB_END_EVENT_BIT)
+                /*
+                 * already processed, or nearing end of the profiling, i.e. no
+                 * corresponding lb_end event found.
+                 */
                     continue;
 
                 long delta = res[c].deq[x].time_ns - res[c].enq[i].time_ns;
-
-                /*
-                 * nearing the start or the end of profiling, or, the ringbuf can't
-                 * keep up with the event rate, hence losing the corresponding
-                 * event. Give up this event pair.
-                 */
+            /*
+             * nearing the start of profiling, no matching event pair found.
+             * Give up this event.
+             */
                 if (unlikely(delta < 0)) {
-                    res[c].deq[x].time_ns |= LB_END_EVENT_BIT; /* mark as processed */
+                    /* mark as processed */
+                    res[c].deq[x].time_ns |= LB_END_EVENT_BIT;
                     orphan_event++;
                     break;
                 }
@@ -109,6 +119,9 @@ static void report_result(void)
             }
         }
     }
+
+// IF RESULT IS WEIRD, TRY FLUSH CACHE WITH SYSTEM('ECHO ... > /SYS/CACHE....'), this is bacause of the PERCPU_ARRAY
+
     /*
      * don't messing result we're interested in, hence stderr.
      *
@@ -125,6 +138,8 @@ static void report_result(void)
             res[0].nr_enq_ev,
             res[0].nr_deq_ev,
             orphan_event);
+    free(this_cpu_idx);
+    free(map);
 }
 
 int main(int ac, char *av[])
@@ -140,14 +155,6 @@ int main(int ac, char *av[])
     }
 
     nproc = get_nprocs_conf();
-    map = malloc(sizeof(*map) * nproc);
-    res = malloc(sizeof(*res) * nproc);
-    if (!map || !res) {
-        fprintf(stderr, "Failed to malloc\n");
-        return -1;
-    }
-    memset(res, 0, sizeof(*res) * nproc);
-    memset(map, 0, sizeof(*map) * nproc);
 
     err = time_in_lb_bpf__load(skel);
     if (err) {
@@ -179,6 +186,7 @@ int main(int ac, char *av[])
     while (!exiting) {
         sleep(1);
     }
+sleep(20);
     report_result();
     fprintf(stderr, "\ndone post processing, press enter to exit...");
     getchar();
