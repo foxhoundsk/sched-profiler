@@ -6,6 +6,9 @@
 
 #include "common.h"
 
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+
 /* sched BPF requires this */
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
@@ -17,7 +20,7 @@ struct {
 } rb SEC(".maps");
 */
 
-/* CAUTION: PERCPU_ARRAY has size limitation of 32KB */
+/* CAUTION: PERCPU_ARRAY has size limitation of 32KB (per entry) */
 /* https://elixir.bootlin.com/linux/v5.15/source/include/linux/percpu.h#L23 */
 /* https://elixir.bootlin.com/linux/v5.15/source/mm/percpu.c#L1756 */
 struct {
@@ -53,39 +56,30 @@ unsigned long dropped __attribute__((aligned(128))) = 0;
 SEC("sched/cfs_trigger_load_balance_start")
 int BPF_PROG(lb_start)
 {
-    lb_event_t *ev, *p_ev;
+    lb_event_t *ev;
     this_cpu_idx_t *idx;
     __u32 zero = 0;
 
     idx = bpf_map_lookup_elem(&this_cpu_idx, &zero);
-    if (!idx) {
+    if (unlikely(!idx)) {
 #ifdef DEBUG
         __sync_fetch_and_add(&dropped, 1);
 #endif
         return 0;
     }
-    if (idx->nr_event == EVENT_SZ)
+    if (unlikely(idx->nr_event == EVENT_SZ))
         return 0;
 
     ev = bpf_map_lookup_elem(&map, &idx->nr_event);
-    if (!ev) {
+    if (unlikely(!ev)) {
 #ifdef DEBUG
         __sync_fetch_and_add(&dropped, 1);
 #endif
         return 0;
     }
-/*
-if (idx->nr_event != 0) { turns out we can see what lb_end saved to the map
-__u32 tmp;
-tmp = idx->nr_event-1;
-p_ev = bpf_map_lookup_elem(&map, &tmp);
-if (!p_ev)
-    return 0;
-bpf_printk("cur_idx: %u, prev time_ns: %ld\n", idx->nr_event, p_ev->time_ns);
-}*/
-//bpf_printk("START\n");
+
     ev->time_ns = bpf_ktime_get_ns();
-//bpf_printk("%ld\n", ev->time_ns);
+//bpf_printk("start ev cpu: %d, ev: %u\n", bpf_get_smp_processor_id(), idx->nr_event);
     idx->nr_event++;
     //e->smp_cpu = bpf_get_smp_processor_id();
     /*
@@ -111,18 +105,19 @@ int BPF_PROG(lb_end)
     lb_event_t *ev;
     this_cpu_idx_t *idx;
     __u32 zero = 0;
+
     idx = bpf_map_lookup_elem(&this_cpu_idx, &zero);
-    if (!idx) {
+    if (unlikely(!idx)) {
 #ifdef DEBUG
         __sync_fetch_and_add(&dropped, 1);
 #endif
         return 0;
     }
-    if (idx->nr_event == EVENT_SZ)
+    if (unlikely(idx->nr_event == EVENT_SZ))
         return 0;
 
     ev = bpf_map_lookup_elem(&map, &idx->nr_event);
-    if (!ev) {
+    if (unlikely(!ev)) {
 #ifdef DEBUG
         __sync_fetch_and_add(&dropped, 1);
 #endif

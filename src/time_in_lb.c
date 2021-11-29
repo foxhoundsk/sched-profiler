@@ -2,6 +2,7 @@
 #include <sys/resource.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdlib.h> /* system() */
 #include <unistd.h>
 #include <sys/sysinfo.h> /* nproc */
 #include <bpf/bpf.h>
@@ -21,6 +22,14 @@ struct result {
 
 static volatile bool exiting = false;
 static struct time_in_lb_bpf *skel;
+static int nproc;
+static this_cpu_idx_t *this_cpu_idx;
+
+/*
+ * this dummy stops the BPF progs, i.e. they would return early instead of
+ * doing normal stuff.
+ */
+static this_cpu_idx_t *end_prof_dummy;
 
 static void bump_memlock_rlimit(void)
 {
@@ -37,55 +46,72 @@ static void bump_memlock_rlimit(void)
 
 static void sig_handler(int sig)
 {
-    exiting = true;
-    fprintf(stderr, "SIGINT received, doing post-processing...\n");
-}
+    int zero = 0, err;
 
-static int nproc;
+    fprintf(stderr, "\nSIGINT received, doing post-processing...\n");
+
+    /* to check BPF_STATS accurately */
+    system("../tools/bpftool prog list > bpftool_list_res");
+
+    /* save current result before populating with the end_dummy */
+    err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.this_cpu_idx), &zero,
+                            this_cpu_idx);
+    if (err) {
+        fprintf(stderr, "Failed to lookup BPF map\n");
+        exit(-1);
+    }
+    err = bpf_map_update_elem(bpf_map__fd(skel->maps.this_cpu_idx), &zero,
+                              end_prof_dummy, BPF_ANY);
+    if (err) {
+        fprintf(stderr, "Failed to update BPF map\n");
+        exit(-1);
+    }
+
+    exiting = true;
+}
 
 static void report_result(void)
 {
-    int orphan_event = 0, zero = 0, err;
-    this_cpu_idx_t *this_cpu_idx;
+    int orphan_event = 0, err, tt_enq = 0, tt_deq = 0;
     lb_event_t *map;
     struct result *res;
 
     res = malloc(sizeof(*res) * nproc);
-    this_cpu_idx = malloc(sizeof(*this_cpu_idx) * nproc);
-    map = malloc(sizeof(*map) * EVENT_SZ);
-    if (!this_cpu_idx || !map || !res) {
+    map = malloc(sizeof(*map) * nproc);
+    if (!map || !res) {
         fprintf(stderr, "Failed to malloc\n");
         return;
     }
     memset(res, 0, sizeof(*res) * nproc);
-    err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.this_cpu_idx), &zero, this_cpu_idx);
-    if (err) {
-        fprintf(stderr, "Failed to lookup BPF map\n");
-        return;
-    }
 
-    for (int c = 0; c < nproc; c++) {
-        int idx = this_cpu_idx[c].nr_event;
-//fprintf(stderr, "cpu: %d idx: %d\n", c, idx);
-        err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.map), &c, map);
+    for (int key = 0; key < EVENT_SZ; key++) {
+        /* BPF_MAP_BATCH_LOOKUP_ELEM can reduce syscalls */
+        err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.map), &key, map);
         if (err) {
             fprintf(stderr, "Failed to lookup BPF map\n");
             return;
         }
-        for (int i = 0; i < idx; i++) {
-fprintf(stderr, "processing ns: %ld\n", map[i].time_ns);
-            if (map[i].time_ns & LB_END_EVENT_BIT) {
-                res[c].deq[res[c].nr_deq_ev++].time_ns = map[i].time_ns &
+        for (int c = 0; c < nproc; c++) {
+            /* exceeds max entry of this cpu */
+            if (this_cpu_idx[c].nr_event <= key)
+                continue;
+
+            if (map[c].time_ns & LB_END_EVENT_BIT) {
+                res[c].deq[res[c].nr_deq_ev++].time_ns = map[c].time_ns &
                                                          ~LB_END_EVENT_BIT;
-//fprintf(stderr, "WWWW\n");
             } else {
-                res[c].enq[res[c].nr_enq_ev++] = map[i];
+                res[c].enq[res[c].nr_enq_ev++].time_ns = map[c].time_ns;
             }
         }
-//fprintf(stderr, "this cpu nr_enq: %d\n", res[c].nr_enq_ev);
-/*
-fprintf(stderr, "nr_deq_ev: %d %ld\n", res[c].nr_deq_ev, res[c].deq[0].time_ns);
-fprintf(stderr, "nr_enq_ev: %d %ld\n", res[c].nr_enq_ev, res[c].enq[0].time_ns);*/
+    }
+
+    for (int c = 0; c < nproc; c++) {
+        tt_enq += res[c].nr_enq_ev;
+        tt_deq += res[c].nr_deq_ev;
+        fprintf(stderr, "CPU: %d has %4d LB_START event(s), %4d LB_END "
+                "event(s), total of %4d\n",
+                c, res[c].nr_enq_ev, res[c].nr_deq_ev,
+                res[c].nr_enq_ev + res[c].nr_deq_ev);
         for (int i = 0; i < res[c].nr_enq_ev; i++) {
             /* TODO
              * by using percpu_array, we can start from previous event, instead
@@ -101,15 +127,14 @@ fprintf(stderr, "nr_enq_ev: %d %ld\n", res[c].nr_enq_ev, res[c].enq[0].time_ns);
                     continue;
 
                 long delta = res[c].deq[x].time_ns - res[c].enq[i].time_ns;
-            /*
-             * nearing the start of profiling, no matching event pair found.
-             * Give up this event.
-             */
+                /*
+                 * nearing the start of profiling, no matching event pair found.
+                 */
                 if (unlikely(delta < 0)) {
-                    /* mark as processed */
+                    /* mark as processed (deprecated) */
                     res[c].deq[x].time_ns |= LB_END_EVENT_BIT;
                     orphan_event++;
-                    break;
+                    continue;
                 }
 
                 res[c].deq[x].time_ns |= LB_END_EVENT_BIT;
@@ -120,31 +145,72 @@ fprintf(stderr, "nr_enq_ev: %d %ld\n", res[c].nr_enq_ev, res[c].enq[0].time_ns);
         }
     }
 
-// IF RESULT IS WEIRD, TRY FLUSH CACHE WITH SYSTEM('ECHO ... > /SYS/CACHE....'), this is bacause of the PERCPU_ARRAY
-
     /*
-     * don't messing result we're interested in, hence stderr.
-     *
      * for minimizing measurement overhead, some metrics are
-     * disabled for normal compilation.
+     * disabled for normal compilation. I.e., mertics that
+     * enclosed by the DEBUG flag.
      */
 #ifdef DEBUG
     fprintf(stderr, "dropped %ld event(s)\n",
             __atomic_load_n(&skel->bss->dropped, __ATOMIC_RELAXED));
 #endif
-    fprintf(stderr, "captured %d event(s)\nenqueue event: %d, "
-            "picked-up event: %d\norphan event: %d\n",
-            res[0].nr_enq_ev + res[0].nr_deq_ev, // TODO make this percpu
-            res[0].nr_enq_ev,
-            res[0].nr_deq_ev,
+    fprintf(stderr, "captured %d event(s)\nLB_START event: %d, "
+            "LB_END event: %d\norphan event: %d\n",
+            tt_enq + tt_deq,
+            tt_enq,
+            tt_deq,
             orphan_event);
-    free(this_cpu_idx);
     free(map);
+}
+
+/*
+ * Check if the desired amount of event has reached, `target_ev` would be
+ * EVENT_SZ if not specified at cmdline.
+ */
+static bool should_stop(int target_ev)
+{
+    int err, zero = 0;
+
+    err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.this_cpu_idx), &zero, this_cpu_idx);
+    if (err) {
+        fprintf(stderr, "Failed to lookup BPF map\n");
+        return true;
+    }
+
+    /* once all of the CPUs reached the amount, stop profiling */
+    for (int c = 0; c < nproc; c++) {
+        if (this_cpu_idx[c].nr_event == target_ev) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    return true;
 }
 
 int main(int ac, char *av[])
 {
-    int err, map_fd, zero = 0;
+    int err, target_ev = EVENT_SZ;
+
+    if (ac == 2)
+        target_ev = atoi(av[1]);
+
+    nproc = get_nprocs_conf();
+
+    end_prof_dummy = malloc(sizeof(*end_prof_dummy) * nproc);
+    if (!end_prof_dummy) {
+        fprintf(stderr, "Failed to malloc\n");
+        return -1;
+    }
+    this_cpu_idx = malloc(sizeof(*this_cpu_idx) * nproc);
+    if (!this_cpu_idx) {
+        fprintf(stderr, "Failed to malloc\n");
+        free(end_prof_dummy);
+        return -1;
+    }
+
+    for (int i = 0; i < nproc; i++)
+        end_prof_dummy[i].nr_event = EVENT_SZ;
 
     bump_memlock_rlimit();
 
@@ -153,8 +219,6 @@ int main(int ac, char *av[])
         fprintf(stderr, "Failed to open BPF skeleton\n");
         return -1;
     }
-
-    nproc = get_nprocs_conf();
 
     err = time_in_lb_bpf__load(skel);
     if (err) {
@@ -183,16 +247,24 @@ int main(int ac, char *av[])
 
     signal(SIGINT, sig_handler);
 
-    while (!exiting) {
-        sleep(1);
+    while (!exiting && !should_stop(target_ev)) {
+        sleep(5);
     }
-sleep(20);
+
+    /*
+     * wait a moment before retrieving the result, as the BPF progs may still
+     * updating the entries we're interested in.
+     */
+    sleep(1);
+
     report_result();
     fprintf(stderr, "\ndone post processing, press enter to exit...");
     getchar();
 
 cleanup:
     time_in_lb_bpf__destroy(skel);
+    free(end_prof_dummy);
+    free(this_cpu_idx);
 
     return err < 0 ? -err : 0;
 }
