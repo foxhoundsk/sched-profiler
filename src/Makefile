@@ -4,8 +4,8 @@ LLVM_STRIP ?= llvm-strip
 BPFTOOL ?= $(abspath ../tools/bpftool)
 
 # FIXME: path/to/patched/kernel/tree
-TREE:= $(abspath ../../linux/linux/)
-#LIBBPF_SRC := $(abspath ../../linux/linux/tools/lib/bpf/)
+TREE:= $(abspath /home/arch/libbpf)
+LIBBPF_SRC := $(abspath $(TREE)/tools/lib/bpf/)
 
 # NOTE: this libbpf.a should be sched bpf flavored object
 LIBBPF_OBJ := $(abspath $(TREE)/tools/lib/bpf/libbpf.a)
@@ -72,12 +72,12 @@ $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) common.h $(PER_KERN_HEADER)| $(OUTPUT)
 	$(Q)$(LLVM_STRIP) -g $@
 
 # TODO: MAKE -C into kernel tree to build the lib
-#$(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPUT)/libbpf
-#	$(call msg,LIB,$@)
-#	$(Q)$(MAKE) -C $(LIBBPF_SRC) BUILD_STATIC_ONLY=1                      \
-#                   OBJDIR=$(dir $@)/libbpf DESTDIR=$(dir $@)                 \
-#                   INCLUDEDIR= LIBDIR= UAPIDIR=                              \
-#                   install
+$(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPUT)/libbpf
+	$(call msg,LIB,$@)
+	$(Q)$(MAKE) -C $(LIBBPF_SRC) BUILD_STATIC_ONLY=1                      \
+                   OBJDIR=$(dir $@)/libbpf DESTDIR=$(dir $@)                 \
+                   INCLUDEDIR= LIBDIR= UAPIDIR=                              \
+                   install
 
 # delete failed targets
 .DELETE_ON_ERROR:
