@@ -50,10 +50,7 @@ static void sig_handler(int sig)
 
     fprintf(stderr, "\nSIGINT received, doing post-processing...\n");
 
-    /* to check BPF_STATS accurately */
-    system("../tools/bpftool prog list > bpftool_list_res");
-
-    /* save current result before populating with the end_dummy */
+    /* save current index before populating with the end_dummy */
     err = bpf_map_lookup_elem(bpf_map__fd(skel->maps.this_cpu_idx), &zero,
                             this_cpu_idx);
     if (err) {
@@ -116,7 +113,7 @@ static void report_result(void)
             /* TODO
              * by using percpu_array, we can start from previous event, instead
              * of the first event, since it's not possible that the event pair
-             * can interleave with each other (i.e. the SMP stuff).
+             * can interleave with each other.
              */
             for (int x = 0; x < res[c].nr_deq_ev; x++) {
                 if (res[c].deq[x].time_ns & LB_END_EVENT_BIT)
@@ -250,6 +247,9 @@ int main(int ac, char *av[])
     while (!exiting && !should_stop(target_ev)) {
         sleep(5);
     }
+
+    /* to check BPF_STATS accurately */
+    system("../tools/bpftool prog list > bpftool_list_res");
 
     /*
      * wait a moment before retrieving the result, as the BPF progs may still
