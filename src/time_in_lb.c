@@ -258,8 +258,6 @@ int main(int ac, char *av[])
     sleep(1);
 
     report_result();
-    fprintf(stderr, "\ndone post processing, press enter to exit...");
-    getchar();
 
 cleanup:
     time_in_lb_bpf__destroy(skel);
