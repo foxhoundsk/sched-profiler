@@ -27,14 +27,14 @@ struct {
         __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
         __uint(max_entries, EVENT_SZ);
         __type(key, __u32);
-        __type(value, sizeof(lb_event_t));
+        __type(value, lb_event_t);
 } map SEC(".maps");
 
 struct {
         __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
         __uint(max_entries, 1);
         __type(key, __u32);
-        __type(value, sizeof(this_cpu_idx_t));
+        __type(value, this_cpu_idx_t);
 } this_cpu_idx SEC(".maps");
 #ifdef DEBUG
 /*
