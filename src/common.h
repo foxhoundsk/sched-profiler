@@ -32,6 +32,18 @@ struct lb_percpu_arr {
     unsigned int idx;
     lb_event_t e[EVENT_SZ];
 };
-typedef struct lb_percpu_arr lb_percpu_arr_t;
+
+static unsigned int to_log2(unsigned int v)
+{
+	unsigned int r;
+	unsigned int shift;
+
+	r = (v > 0xFFFF) << 4; v >>= r;
+	shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
+	shift = (v > 0xF) << 2; v >>= shift; r |= shift;
+	shift = (v > 0x3) << 1; v >>= shift; r |= shift;
+	r |= (v >> 1);
+	return r;
+}
 
 #endif /* __COMMON_H */

@@ -17,6 +17,8 @@ CFLAGS := -g -Wall -freorder-blocks
 COMMON_FLAGS :=
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
+THIRD_PARTY_USER_SRCS := trace_helpers.c
+
 APPS = time_in_rq time_in_lb
 
 ifeq ($(V),1)
@@ -44,7 +46,7 @@ $(OUTPUT) $(OUTPUT)/libbpf:
 	$(Q)mkdir -p $@
 
 # Build final application
-$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
+$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(THIRD_PARTY_USER_SRCS) | $(OUTPUT)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $^ -lelf -lz -o $@
 
