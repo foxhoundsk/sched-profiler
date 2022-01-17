@@ -8,11 +8,10 @@
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
-#define EVENT_SZ 65536 * 2
 
 static struct {
-    rq_event_t enq[EVENT_SZ]; /* 4MB */
-    rq_event_t deq[EVENT_SZ];
+    rq_event_t enq[RQ_EVENT_SZ]; /* 4MB */
+    rq_event_t deq[RQ_EVENT_SZ];
     int nr_enq_ev;
     int nr_deq_ev;
 } res = {};
@@ -42,7 +41,7 @@ static int handle_event(void *ctx, void *data, size_t size)
 {
     rq_event_t *e = data;
 
-    if (unlikely(res.nr_deq_ev == EVENT_SZ || res.nr_enq_ev == EVENT_SZ))
+    if (unlikely(res.nr_deq_ev == RQ_EVENT_SZ || res.nr_enq_ev == RQ_EVENT_SZ))
         return -EXFULL;
 
     if (e->pid & DEQ_EVENT_BIT) {
