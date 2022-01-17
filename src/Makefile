@@ -67,7 +67,7 @@ $(PER_KERN_HEADER):
 # Build BPF code
 $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) common.h $(PER_KERN_HEADER)| $(OUTPUT)
 	$(call msg,BPF,$@)
-	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)               \
+	$(Q)$(CLANG) -g -O2 -target bpf -mcpu=v3 -D__TARGET_ARCH_$(ARCH)               \
                      $(INCLUDES) $(COMMON_FLAGS) -c $(filter %.c,$^) -o $@
 	$(Q)$(LLVM_STRIP) -g $@
 
