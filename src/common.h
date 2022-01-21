@@ -7,6 +7,7 @@
 #define RQ_EVENT_SZ 1024
 #define HIST_MAP_BUCKET_SZ 16
 #define PERF_MAX_STACK_DEPTH 127 /* from /usr/include/linux/perf_event.h */
+#define NPROC 16 /* power of 2 */
 
 /* hardcoded 64-byte cacheline alignment */
 #define __cacheline_aligned __attribute__ ((aligned(64)))
@@ -18,12 +19,6 @@ struct rq_event {
     unsigned long ctxt_switches; /* nvcsw + nivcsw */
 };
 typedef struct rq_event rq_event_t;
-
-struct lb_event {
-    long time_ns;
-    //int smp_cpu;
-};
-typedef struct lb_event lb_event_t;
 
 /*
  * kernel do 8-byte alignment on at least PERCPU_ARRAY map, hence corresponding
@@ -50,6 +45,35 @@ struct percpu_event {
     long time_ns[LB_EVENT_SZ];
     struct lb_iter_cnt lb_iter[LB_EVENT_SZ];
 } __cacheline_aligned;
+
+/* S: start, E: end */
+enum lb_ev_type {
+    THL_S, /* task_h_load */
+    THL_E,
+    CMT_S, /* can_migrate_task */
+    CMT_E,
+    ATS_S, /* attach_tasks */
+    ATS_E,
+    SOCN_S, /* stop_one_cpu_nowait */
+    SOCN_E,
+    FBQ_S, /* find_busiest_queue */
+    FBQ_E,
+    FBG_S, /* find_busiest_group */
+    FBG_E,
+    DETACH_TASK_S,
+    DETACH_TASK_E,
+    DETACH_TASKS_S,
+    DETACH_TASKS_E,
+    KP_LB, /* kprobe load_balance */
+    LB_E, /* load_balance end */
+    NR_EVENT,
+};
+
+struct lb_event {
+    enum lb_ev_type type;
+    long ts;
+    long stack_id;
+};
 
 static unsigned int to_log2(unsigned int v)
 {
