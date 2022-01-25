@@ -17,7 +17,7 @@
 #define unlikely(x)     __builtin_expect((x),0)
 
 /* TODO add this to cmdline option */
-#define EVENT_THRES     3000
+#define EVENT_THRES     5000
 
 /* detach_tasks can detach at most 32 tasks per call */
 #define MAX_NR_MIGRATION 32
@@ -42,6 +42,9 @@ struct prof_entry { /* profiling entry */
         struct {
             long s;
             long e;
+            long crl_s; /* cfs_rq_last_update_time */
+            long crl_e;
+            long stc_e;
         } dt[MAX_NR_MIGRATION];
         int nr_dt; /* detach_task */
 
@@ -192,6 +195,8 @@ enum lb_func_idx {
     SOCN,
     FBG,
     FBQ,
+    CRLUT,
+    STC,
     LB_FUNC_MAX,
 };
 static const char *LB_FUNC_NAME[] = {
@@ -203,12 +208,14 @@ static const char *LB_FUNC_NAME[] = {
     [SOCN]         = "stop_one_cpu_nowait",
     [FBG]          = "find_busiest_group",
     [FBQ]          = "find_busiest_queue",
+    [CRLUT]        = "deactivate_task", /* reusing tracepoint */
+    [STC]          = "set_task_cpu", /* reusing tracepoint */
 };
 
 static void report_result(void)
 {
     int orphan_event = 0, tt_enq = 0, tt_deq = 0, stackmap_fd,
-        hist_map[HIST_MAP_BUCKET_SZ] = {}, max_mb = 0;
+        hist_map[HIST_MAP_BUCKET_SZ] = {}, maxl = 0, maxI, mdelta, maxl2 = 0, maxI2, mdelta2;
 
     /* stackmap collision count */
     int stackmap_cc = 0;
@@ -236,7 +243,7 @@ static void report_result(void)
             if (delta < EVENT_THRES)
                 continue;
 
-            fprintf(stderr, "CPU%d, entry no.%d\n", c, i);
+            fprintf(stderr, "CPU%d, entry no.%d, stack_id: %lu\n", c, i, pe->stack_id);
 
             print_stacktrace(stackmap_fd, pe->stack_id);
             fprintf(stderr, "-> %ld ns\n", delta);
@@ -304,7 +311,8 @@ static void report_result(void)
                 }
 
                 for (int d = 0; d < pe->dts[z].nr_dt; d++) {
-                    delta = pe->dts[z].dt[d].e - pe->dts[z].dt[d].s;
+                    //delta = pe->dts[z].dt[d].e - pe->dts[z].dt[d].s;
+                    delta = pe->dts[z].dt[d].stc_e - pe->dts[z].dt[d].crl_s; // XXX for now, these represents overhead of dt
                     sum += (int) delta;
 
                     for (int v = 0; v < 2; v++)
@@ -312,10 +320,38 @@ static void report_result(void)
 
                     fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[DETACH_TASK],
                             delta);
+
+                    /* deactivate_task call site */
+                    delta = pe->dts[z].dt[d].crl_e - pe->dts[z].dt[d].crl_s;
+if (delta > maxl){
+    maxl = delta;
+    maxI = i;
+    mdelta = pe->dts[z].dt[d].stc_e - pe->dts[z].dt[d].crl_s;
+}
+                    for (int v = 0; v < 3; v++)
+                        fprintf(stderr, "  ");
+
+                    fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[CRLUT],
+                            delta);
+
+                    /* set_task_cpu call site */
+                    delta = pe->dts[z].dt[d].stc_e - pe->dts[z].dt[d].crl_e;
+if (delta > maxl2){
+    maxl2 = delta;
+    maxI2 = i;
+    mdelta2 = pe->dts[z].dt[d].stc_e - pe->dts[z].dt[d].crl_s;
+}
+                    for (int v = 0; v < 3; v++)
+                        fprintf(stderr, "  ");
+
+                    fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[STC],
+                            delta);
                 }
-                if (sum) /* XXX if any subsequent use of sum, remember to do the reset */
+                if (sum) {
                     fprintf(stderr, "[%s called %d times, elapsed: %d ns]\n",
                             LB_FUNC_NAME[DETACH_TASK], pe->dts[z].nr_dt, sum);
+                    sum = 0;
+                }
             }
 
             /* attach_tasks call site */
@@ -381,7 +417,8 @@ static void report_result(void)
                 : "");
 
     report_log2(hist_map);
-    //fprintf(stderr, "max_redo: %d\n", max_mb);
+    fprintf(stderr, "max deactivate_task: %d ns, index: %d, detach_task costs: %dns\n", maxl, maxI, mdelta);
+    fprintf(stderr, "max set_task_cpu: %d ns, index: %d, detach_task costs: %dns\n", maxl2, maxI2, mdelta2);
 }
 
 /*
@@ -409,25 +446,51 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
         return vfprintf(stderr, format, args);
 }
 
+/* TODO for a more robust event (not a truncated one which typically occurs at the start of the profiling), */
+/* we need to employ percpu state tracking, if the state is not the expected state, we fallback to the first state */
 /* FIXME we waste 8 bytes for stack_id field, which only used in KP_LB event */
 /* consider using variable-length event */
 /* XXX consider add a check in BPF progs for checking buffer overrun. I.e. */
 /* check retval of bpf_perf_event_output() */
-static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
+static int ringbuf_cb(void *ctx, void *data, size_t size)
 {
     const struct lb_event *e = (struct lb_event*) data;
     struct prof_entry *pe;
-    enum lb_ev_type *last_state = &res.cpu_last_state[cpu];
+    enum lb_ev_type *last_state = &res.cpu_last_state[e->cpu];
     int idx;
     int *idx_p;
 
-    if (unlikely(res.nr_cpu_ev[cpu] >= NR_ENTRY_PERCPU)) {
-        fprintf(stderr, "WARN: Buffer for CPU%d has no space left\n", cpu);
-        return;
+    if (unlikely(res.nr_cpu_ev[e->cpu] >= NR_ENTRY_PERCPU)) {
+        fprintf(stderr, "WARN: Buffer for CPU%d has no space left\n", e->cpu);
+        return 0; /* if we return negavite val, other CPUs event  */
     }
-    pe = res.cpu[cpu] + res.nr_cpu_ev[cpu];
+
+    /* FIXME this abstraction looks nasty, put nr_cpu_ev into struct `cpu` and rename to nr_ev */
+    pe = res.cpu[e->cpu] + res.nr_cpu_ev[e->cpu];
 
     switch (e->type) {
+    case STC_E:
+        idx_p = &pe->dts[pe->nr_dts].nr_dt;
+        /* no way this can greater than MAX_NR_MIGRATION */
+        assert(*idx_p <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[*idx_p].stc_e = e->ts;
+//        *last_state = DETACH_TASK_E;
+        (*idx_p)++; // STC_E now acts as index updater for detach_task
+        break;
+    case CRLUT_S:
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        /* no way this can greater than MAX_NR_MIGRATION */
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].crl_s = e->ts;
+//        *last_state = DETACH_TASK_S;
+        break;
+    case CRLUT_E:
+        idx = pe->dts[pe->nr_dts].nr_dt; // no need to update as it's DETACH_TASK_E's job
+        /* no way this can greater than MAX_NR_MIGRATION */
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].crl_e = e->ts;
+//        *last_state = DETACH_TASK_E;
+        break;
     case DETACH_TASK_S:
         idx = pe->dts[pe->nr_dts].nr_dt;
         /* no way this can greater than MAX_NR_MIGRATION */
@@ -558,7 +621,7 @@ static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
             pe->dts[0].nr_dt != 0 || pe->dts[0].nr_thl ||
             pe->nr_ats != 0 || pe->nr_socn || pe->nr_fbg || pe->nr_fbq)) {
             fprintf(stderr, "Possible buffer overrun at CPU%d entry no.%d\n",
-                    cpu, res.nr_cpu_ev[cpu]);
+                    e->cpu, res.nr_cpu_ev[e->cpu]);
             for (int i = 0; i <= pe->nr_dts; i++) {
                 pe->dts[i].nr_dt = 0;
                 pe->dts[i].nr_cmt = 0;
@@ -587,7 +650,7 @@ static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
          */
         if (unlikely(!pe->lb_s)) {
             fprintf(stderr, "Possible buffer overrun at CPU%d entry no.%d\n",
-                    cpu, res.nr_cpu_ev[cpu]);
+                    e->cpu, res.nr_cpu_ev[e->cpu]);
             for (int i = 0; i <= pe->nr_dts; i++) {
                 pe->dts[i].nr_dt = 0;
                 pe->dts[i].nr_cmt = 0;
@@ -599,26 +662,29 @@ static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
             pe->nr_fbq = 0;
             pe->nr_fbg = 0;
         } else
-            res.nr_cpu_ev[cpu]++;
+            res.nr_cpu_ev[e->cpu]++;
 
         break; 
     default:
-        fprintf(stderr, "Seen unknown event from perfbuf\n");
+        fprintf(stderr, "Seen unknown event from the ringbuf\n");
         exit(-1);
     }
+
+    return 0;
 }
 
 int main(int ac, char *av[])
 {
     int err;
+    struct ring_buffer *rb;
     unsigned int target_ev = LB_EVENT_SZ;
-    struct perf_buffer *pb = NULL;
-    struct perf_buffer_opts pb_opts = {};
 
  //   libbpf_set_print(libbpf_print_fn);
 
     if (ac == 2)
         target_ev = atoi(av[1]);
+
+    bump_memlock_rlimit();
 
     if (load_kallsyms()) {
         fprintf(stderr, "Failed to process /proc/kallsyms\n");
@@ -648,27 +714,17 @@ int main(int ac, char *av[])
         return -1;
     }
     
-    bump_memlock_rlimit();
-
     skel = time_in_lb_bpf__open();
     if (!skel) {
         fprintf(stderr, "Failed to open BPF skeleton\n");
         return -1;
     }
 
+    /* FIXME unless otherwise necessary, this can shrink into time_in_lb_bpf__open_and_load */
     err = time_in_lb_bpf__load(skel);
     if (err) {
         fprintf(stderr, "Failed to load BPF program\n");
         return -1;
-    }
-
-    pb_opts.sample_cb = perfbuf_cb;
-    pb = perf_buffer__new(bpf_map__fd(skel->maps.pb), 4 /* 32KB per CPU */,
-                          &pb_opts);
-    err = libbpf_get_error(pb);
-    if (err) {
-        fprintf(stderr, "Failed to create perf buffer\n");
-        goto cleanup;
     }
 
     err = time_in_lb_bpf__attach(skel);
@@ -677,27 +733,33 @@ int main(int ac, char *av[])
         goto cleanup;
     }
 
+    rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), ringbuf_cb, NULL, NULL);
+    if (!rb) {
+        err = -1;
+        fprintf(stderr, "Failed to create ring buffer\n");
+        goto cleanup;
+    }
+
     signal(SIGINT, sig_handler);
 //int tt;
     while (!exiting /*&& !should_stop(target_ev)*/) {
+        ring_buffer__poll(rb, 100 /* timeout, ms */);
 /*
         if (-1 < (tt=__atomic_load_n(&skel->data->tf, __ATOMIC_ACQUIRE)))
             fprintf(stderr, "PASSED: %d\n", tt);
         else
             fprintf(stderr, "havent PASSED: %d\n", tt);
   */
-        perf_buffer__poll(pb, 100 /* timeout, ms */);
-        //sleep(5);
     }
 
     /* to timely check BPF_STATS */
-    system("../tools/bpftool prog list > bpftool_list_res");
+ //   system("../tools/bpftool prog list > bpftool_list_res");
 
     report_result();
 
 cleanup:
     time_in_lb_bpf__destroy(skel);
-    perf_buffer__free(pb);
+    ring_buffer__free(rb);
     for (int i = 0; i < nproc; i++)
         free(res.cpu[i]);
     free(res.cpu);

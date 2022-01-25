@@ -13,12 +13,12 @@
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 /* BPF ringbuf map */
-/*
+
 struct {
         __uint(type, BPF_MAP_TYPE_RINGBUF);
-        __uint(max_entries, 2 * 1024 * 1024  2MB ); 
+        __uint(max_entries, 1024 * 1024  /* 1MB */ ); 
 } rb SEC(".maps");
-*/
+
 
 /* CAUTION: PERCPU_ARRAY has size limitation of 32KB (per entry) */
 /* https://elixir.bootlin.com/linux/v5.15/source/include/linux/percpu.h#L23 */
@@ -30,13 +30,13 @@ struct {
         __uint(value_size, PERF_MAX_STACK_DEPTH * sizeof(u64));
         __uint(max_entries, 50000);
 } stackmap SEC(".maps");
-
+/*
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 	__uint(key_size, sizeof(int));
 	__uint(value_size, sizeof(int));
 } pb SEC(".maps");
-
+*/
 #ifdef DEBUG
 /*
  * @dropped
@@ -84,7 +84,7 @@ int do_lb_end(struct sched_switch_args *ctx)
     return 0;
 }
 */
-
+/*
 SEC("raw_tp/sched_detach_one_task_start")
 int dt_start(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -108,31 +108,96 @@ int dt_end(struct bpf_raw_tracepoint_args *ctx)
 
     return 0;
 }
-
-SEC("raw_tp/sched_detach_tasks_start")
-int dts_start(struct bpf_raw_tracepoint_args *ctx)
+*/
+SEC("sched/detach_tasks_start")
+//int dts_start(struct bpf_raw_tracepoint_args *ctx)
+int BPF_PROG(dts_start)
 {
-    struct lb_event e = {};
+    struct lb_event *e;
 
-    e.type = DETACH_TASKS_S;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = DETACH_TASKS_S;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
 
     return 0;
 }
 
-SEC("raw_tp/sched_detach_tasks_end")
-int dts_end(struct bpf_raw_tracepoint_args *ctx)
+SEC("sched/detach_tasks_end")
+//int dts_end(struct bpf_raw_tracepoint_args *ctx)
+int BPF_PROG(dts_end)
 {
-    struct lb_event e = {};
+    struct lb_event *e;
 
-    e.type = DETACH_TASKS_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = DETACH_TASKS_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+SEC("sched/detach_task_start")
+//int crlut_start(struct bpf_raw_tracepoint_args *ctx)
+int BPF_PROG(crlut_start)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = CRLUT_S;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
 
     return 0;
 }
 
+SEC("sched/detach_task_mid")
+//int crlut_end(struct bpf_raw_tracepoint_args *ctx)
+int BPF_PROG(crlut_end)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = CRLUT_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+
+SEC("sched/detach_task_end")
+//int stc_end(struct bpf_raw_tracepoint_args *ctx)
+int BPF_PROG(stc_end)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = STC_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+/*
 SEC("raw_tp/sched_cmt_s")
 int cmt_s(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -274,17 +339,22 @@ int fbg_e(struct bpf_raw_tracepoint_args *ctx)
 
     return 0;
 }
-
+*/
 SEC("kprobe/load_balance")
 int do_lb_start(struct pt_regs *ctx)
 {
-    struct lb_event e = {};
+    struct lb_event *e;
 
-    e.type = KP_LB;
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = KP_LB;
     /* TODO figure out the flag, why duplicated callstack can co-exist */
-    e.stack_id = bpf_get_stackid(ctx, &stackmap, 0);
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
+    e->stack_id = bpf_get_stackid(ctx, &stackmap, 0);
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
 
     return 0;
 }
@@ -293,14 +363,19 @@ int do_lb_start(struct pt_regs *ctx)
  * hook location:
  * https://elixir.bootlin.com/linux/v5.14/source/kernel/sched/fair.c#L9734
  */
-SEC("raw_tp/sched_lb_end")
+SEC("sched/cfs_trigger_load_balance_end")
 int BPF_PROG(lb_end)
 {
-    struct lb_event e = {};
+    struct lb_event *e;
 
-    e.type = LB_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = LB_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
 
     return 0;
 }

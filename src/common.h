@@ -60,6 +60,9 @@ enum lb_ev_type {
     FBQ_E,
     FBG_S, /* find_busiest_group */
     FBG_E,
+    CRLUT_S, /* cfs_rq_last_update_time */
+    CRLUT_E,
+    STC_E, /* set_task_cpu (use CRLUT_E as the start event) */
     DETACH_TASK_S,
     DETACH_TASK_E,
     DETACH_TASKS_S,
@@ -73,6 +76,7 @@ struct lb_event {
     enum lb_ev_type type;
     long ts;
     long stack_id;
+    int cpu;
 };
 
 static unsigned int to_log2(unsigned int v)
