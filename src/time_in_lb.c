@@ -470,45 +470,41 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
 
     switch (e->type) {
     case STC_E:
+        /* detach_task has 2 possible caller, this filters out the not interested one */
+        if (unlikely(*last_state != CRLUT_E))
+            break;
         idx_p = &pe->dts[pe->nr_dts].nr_dt;
         /* no way this can greater than MAX_NR_MIGRATION */
         assert(*idx_p <= MAX_NR_MIGRATION);
         pe->dts[pe->nr_dts].dt[*idx_p].stc_e = e->ts;
-//        *last_state = DETACH_TASK_E;
-        (*idx_p)++; // STC_E now acts as index updater for detach_task
+        *last_state = STC_E;
+        (*idx_p)++; // XXX STC_E now acts as index updater for detach_task
         break;
-    case CRLUT_S:
+    case CRLUT_S: /* this acts as start event of detach_task */
+        /* XXX
+         * should this condition be true, it can be:
+         * 1. buffer overrun
+         * 2. we are at early stage of the profiling, i.e. some BPF progs
+         *      haven't successfully attached yet.
+         * 3. unexpected call site calls triggered this event, for detach_task,
+         *      callers except detach_tasks is stop_one_cpu_nowait.
+         */
+        if (unlikely(*last_state != DETACH_TASKS_S && *last_state != STC_E))
+            break;
         idx = pe->dts[pe->nr_dts].nr_dt;
         /* no way this can greater than MAX_NR_MIGRATION */
         assert(idx <= MAX_NR_MIGRATION);
         pe->dts[pe->nr_dts].dt[idx].crl_s = e->ts;
-//        *last_state = DETACH_TASK_S;
+        *last_state = CRLUT_S;
         break;
     case CRLUT_E:
+        if (unlikely(*last_state != CRLUT_S))
+            break;
         idx = pe->dts[pe->nr_dts].nr_dt; // no need to update as it's DETACH_TASK_E's job
         /* no way this can greater than MAX_NR_MIGRATION */
         assert(idx <= MAX_NR_MIGRATION);
         pe->dts[pe->nr_dts].dt[idx].crl_e = e->ts;
-//        *last_state = DETACH_TASK_E;
-        break;
-    case DETACH_TASK_S:
-        idx = pe->dts[pe->nr_dts].nr_dt;
-        /* no way this can greater than MAX_NR_MIGRATION */
-        assert(idx <= MAX_NR_MIGRATION);
-        pe->dts[pe->nr_dts].dt[idx].s = e->ts;
-        *last_state = DETACH_TASK_S;
-        break;
-    case DETACH_TASK_E:
-/*      if (unlikely(*last_state != DETACH_TASK_S)) {
-            //fprintf(stderr, "Unexpected cpu state encountered!\n");
-            break;
-        }*/
-        idx_p = &pe->dts[pe->nr_dts].nr_dt;
-        /* no way this can greater than MAX_NR_MIGRATION */
-        assert(*idx_p <= MAX_NR_MIGRATION);
-        pe->dts[pe->nr_dts].dt[*idx_p].e = e->ts;
-        *last_state = DETACH_TASK_E;
-        (*idx_p)++;
+        *last_state = CRLUT_E;
         break;
     case CMT_S:
         idx = pe->dts[pe->nr_dts].nr_cmt;
@@ -533,6 +529,9 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         (*idx_p)++;
         break;
     case DETACH_TASKS_S: /* load_balance may call this multiple times */
+        if (unlikely(*last_state != KP_LB))
+            break;
+
         idx = pe->nr_dts;
         if (unlikely(idx >= MAX_NR_DTS_ITER)) {
             fprintf(stderr, "MAX_NR_DTS_ITER hit, consider increase the size!\n");
@@ -542,6 +541,8 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         *last_state = DETACH_TASKS_S;
         break;
     case DETACH_TASKS_E:
+        if (unlikely(*last_state != STC_E && *last_state != DETACH_TASKS_S))
+            break;
         idx_p = &pe->nr_dts;
         assert(*idx_p <= MAX_NR_DTS_ITER);
         pe->dts[*idx_p].e = e->ts;
@@ -614,13 +615,11 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         break;
     case KP_LB:
         /* XXX move this accordingly if we change the event prolog */
-        /* happens at the early stage, LB_E BPF may not started yet */
+        /* happens at the early stage, where some BPF progs haven't started yet */
         /* or it's because of buffer overrun, i.e. LB_E not called for the prev ev, */
         /* so that nr_cpu_ev didn't update */
-        if (unlikely(pe->nr_dts != 0 || pe->dts[0].nr_cmt != 0 ||
-            pe->dts[0].nr_dt != 0 || pe->dts[0].nr_thl ||
-            pe->nr_ats != 0 || pe->nr_socn || pe->nr_fbg || pe->nr_fbq)) {
-            fprintf(stderr, "Possible buffer overrun at CPU%d entry no.%d\n",
+        if (unlikely(*last_state != LB_E)) {
+            fprintf(stderr, "Possible buffer overrun occurred at CPU%d entry no.%d\n",
                     e->cpu, res.nr_cpu_ev[e->cpu]);
             for (int i = 0; i <= pe->nr_dts; i++) {
                 pe->dts[i].nr_dt = 0;
@@ -639,16 +638,7 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         *last_state = KP_LB;
         break;
     case LB_E:
-        pe->lb_e = e->ts;
-        *last_state = LB_E;
-
-        /*
-         * happens at profiling early stage, where BPF progs haven't all
-         * loaded. In such case, we reset the entry, then it can be reused.
-         * Another case would be buffer overrun, in which case we send a
-         * warnning to stderr, and deprecate the event.
-         */
-        if (unlikely(!pe->lb_s)) {
+        if (unlikely(*last_state != KP_LB && *last_state != DETACH_TASKS_E)) {
             fprintf(stderr, "Possible buffer overrun at CPU%d entry no.%d\n",
                     e->cpu, res.nr_cpu_ev[e->cpu]);
             for (int i = 0; i <= pe->nr_dts; i++) {
@@ -661,10 +651,15 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
             pe->nr_socn = 0;
             pe->nr_fbq = 0;
             pe->nr_fbg = 0;
-        } else
-            res.nr_cpu_ev[e->cpu]++;
+            break;
+        }
 
-        break; 
+        pe->lb_e = e->ts;
+        *last_state = LB_E;
+
+        res.nr_cpu_ev[e->cpu]++;
+
+        break;
     default:
         fprintf(stderr, "Seen unknown event from the ringbuf\n");
         exit(-1);
@@ -713,7 +708,11 @@ int main(int ac, char *av[])
         fprintf(stderr, "Failed to calloc for res\n");
         return -1;
     }
-    
+
+    /* init the state so that we save a if-condition in the hotpath */
+    for (int i = 0; i < nproc; i++)
+        res.cpu_last_state[i] = LB_E;
+
     skel = time_in_lb_bpf__open();
     if (!skel) {
         fprintf(stderr, "Failed to open BPF skeleton\n");
