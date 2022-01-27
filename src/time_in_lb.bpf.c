@@ -109,9 +109,9 @@ int dt_end(struct bpf_raw_tracepoint_args *ctx)
     return 0;
 }
 */
-SEC("sched/detach_tasks_start")
-//int dts_start(struct bpf_raw_tracepoint_args *ctx)
-int BPF_PROG(dts_start)
+//SEC("sched/detach_tasks_start")
+SEC("raw_tp/sched_detach_tasks_start")
+int dts_start(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 
@@ -127,9 +127,8 @@ int BPF_PROG(dts_start)
     return 0;
 }
 
-SEC("sched/detach_tasks_end")
-//int dts_end(struct bpf_raw_tracepoint_args *ctx)
-int BPF_PROG(dts_end)
+SEC("raw_tp/sched_detach_tasks_end")
+int dts_end(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 
@@ -144,9 +143,9 @@ int BPF_PROG(dts_end)
 
     return 0;
 }
-SEC("sched/detach_task_start")
-//int crlut_start(struct bpf_raw_tracepoint_args *ctx)
-int BPF_PROG(crlut_start)
+SEC("raw_tp/sched_crlut_s")
+int crlut_start(struct bpf_raw_tracepoint_args *ctx)
+//int BPF_PROG(crlut_start)
 {
     struct lb_event *e;
 
@@ -162,9 +161,8 @@ int BPF_PROG(crlut_start)
     return 0;
 }
 
-SEC("sched/detach_task_mid")
-//int crlut_end(struct bpf_raw_tracepoint_args *ctx)
-int BPF_PROG(crlut_end)
+SEC("raw_tp/sched_crlut_e")
+int crlut_end(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 
@@ -180,8 +178,7 @@ int BPF_PROG(crlut_end)
     return 0;
 }
 
-SEC("sched/detach_task_end")
-//int stc_end(struct bpf_raw_tracepoint_args *ctx)
+SEC("raw_tp/sched_stc_e")
 int BPF_PROG(stc_end)
 {
     struct lb_event *e;
@@ -197,6 +194,122 @@ int BPF_PROG(stc_end)
 
     return 0;
 }
+
+SEC("raw_tp/sched_deq_task_s")
+int deq_task_cls_start(struct bpf_raw_tracepoint_args *ctx)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = DEQ_TASK_CLS_S;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+SEC("raw_tp/sched_scd_e")
+int scd_end(struct bpf_raw_tracepoint_args *ctx)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = SCD_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+SEC("raw_tp/sched_urc_s")
+int BPF_PROG(urc_s)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = URC_S;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+
+SEC("raw_tp/sched_urc_e")
+int urc_e(struct bpf_raw_tracepoint_args *ctx)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = URC_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+SEC("raw_tp/sched_sidpd_s")
+int BPF_PROG(sidpd_s)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = SIDPD_S;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+
+SEC("raw_tp/sched_sidpd_e")
+int sched_sidpd_e(struct bpf_raw_tracepoint_args *ctx)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = SIDPD_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+/*
+SEC("raw_tp/sched_deq_task_e")
+int deq_task_cls_end(struct bpf_raw_tracepoint_args *ctx)
+{
+    struct lb_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type = DEQ_TASK_CLS_E;
+    e->ts = bpf_ktime_get_ns();
+    e->cpu = bpf_get_smp_processor_id();
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}*/
 /*
 SEC("raw_tp/sched_cmt_s")
 int cmt_s(struct bpf_raw_tracepoint_args *ctx)
@@ -363,8 +476,8 @@ int do_lb_start(struct pt_regs *ctx)
  * hook location:
  * https://elixir.bootlin.com/linux/v5.14/source/kernel/sched/fair.c#L9734
  */
-SEC("sched/cfs_trigger_load_balance_end")
-int BPF_PROG(lb_end)
+SEC("raw_tp/sched_lb_end")
+int lb_end(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 

@@ -32,6 +32,7 @@
 #define MAX_NR_FBG_ITER 2
 #define NR_ENTRY_PERCPU 16384
 
+/* for full name of these timestamps, refer LB_FUNC_NAME */
 struct prof_entry { /* profiling entry */
     long stack_id;
     long lb_s;
@@ -42,9 +43,16 @@ struct prof_entry { /* profiling entry */
         struct {
             long s;
             long e;
-            long crl_s; /* cfs_rq_last_update_time */
+            long crl_s; /* cfs_rq_last_update_time (the name doesnt suggest this) */
             long crl_e;
-            long stc_e;
+            long stc_e; /* the _s counterpart is crl_e */
+            long dtc_s; /* dequeue_task - sched class specific dequeue_task */
+            long dtc_e;
+            long scd_e; /* the _s counterpart is crl_e */
+            long urc_s;
+            long urc_e;
+            long sidpd_s;
+            long sidpd_e;
         } dt[MAX_NR_MIGRATION];
         int nr_dt; /* detach_task */
 
@@ -197,7 +205,11 @@ enum lb_func_idx {
     FBQ,
     CRLUT,
     STC,
-    LB_FUNC_MAX,
+    DEQ_TASK_CLS,
+    SCD,
+    URC,
+    SIDPD,
+    NR_LB_FUNC,
 };
 static const char *LB_FUNC_NAME[] = {
     [DETACH_TASKS] = "detach_tasks",
@@ -209,13 +221,19 @@ static const char *LB_FUNC_NAME[] = {
     [FBG]          = "find_busiest_group",
     [FBQ]          = "find_busiest_queue",
     [CRLUT]        = "deactivate_task", /* reusing tracepoint */
-    [STC]          = "set_task_cpu", /* reusing tracepoint */
+    [STC]          = "set_task_cpu",
+    [DEQ_TASK_CLS] = "dequeue_task_fair", /* as we have state tracking, this must be of _fair class */
+    [SCD]          = "sched_core_dequeue",
+    [URC]          = "update_rq_clock",
+    [SIDPD]        = "sched_info_dequeue__n__psi_dequeue",
 };
 
 static void report_result(void)
 {
     int orphan_event = 0, tt_enq = 0, tt_deq = 0, stackmap_fd,
-        hist_map[HIST_MAP_BUCKET_SZ] = {}, maxl = 0, maxI, mdelta, maxl2 = 0, maxI2, mdelta2;
+        hist_map[HIST_MAP_BUCKET_SZ] = {}, maxl = 0, maxI, mdelta,
+        maxl2 = 0, maxI2, mdelta2,
+        maxl3 = 0, maxI3, mdelta3;
 
     /* stackmap collision count */
     int stackmap_cc = 0;
@@ -238,7 +256,7 @@ static void report_result(void)
 
             record_log2(hist_map, delta);
 
-//            printf("%ld\n", delta); for log into the log file (redirect stdout to file)
+//            printf("%ld\n", delta);
 
             if (delta < EVENT_THRES)
                 continue;
@@ -334,6 +352,48 @@ if (delta > maxl){
                     fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[CRLUT],
                             delta);
 
+                    /* sched_core_dequeue call site */
+                    delta = pe->dts[z].dt[d].scd_e - pe->dts[z].dt[d].crl_s;
+                    for (int v = 0; v < 4; v++)
+                        fprintf(stderr, "  ");
+
+                    fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[SCD],
+                            delta);
+
+                    /* update_rq_clock call site */
+                    delta = pe->dts[z].dt[d].urc_e - pe->dts[z].dt[d].urc_s;
+                    for (int v = 0; v < 4; v++)
+                        fprintf(stderr, "  ");
+
+                    fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[URC],
+                            delta);
+
+                    /* sched_info_dequeue_n_psi_dequeue call site */
+                    delta = pe->dts[z].dt[d].sidpd_e - pe->dts[z].dt[d].sidpd_s;
+                    for (int v = 0; v < 4; v++)
+                        fprintf(stderr, "  ");
+
+                    fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[SIDPD],
+                            delta);
+
+                    /* dequeue_task_fair call site */
+                    /*
+                     * by using crl_e, we can prevent freqnent calling of BPF
+                     * progs (they were called in a seqence without any ops
+                     * between them, so remove the former one.)
+                     */
+                    delta = pe->dts[z].dt[d].crl_e - pe->dts[z].dt[d].dtc_s;
+if (delta > maxl3){
+    maxl3 = delta;
+    maxI3 = i;
+    mdelta3 = pe->dts[z].dt[d].crl_e - pe->dts[z].dt[d].crl_s;
+}
+                    for (int v = 0; v < 4; v++)
+                        fprintf(stderr, "  ");
+
+                    fprintf(stderr, "%s -> %ld ns\n", LB_FUNC_NAME[DEQ_TASK_CLS],
+                            delta);
+
                     /* set_task_cpu call site */
                     delta = pe->dts[z].dt[d].stc_e - pe->dts[z].dt[d].crl_e;
 if (delta > maxl2){
@@ -419,6 +479,7 @@ if (delta > maxl2){
     report_log2(hist_map);
     fprintf(stderr, "max deactivate_task: %d ns, index: %d, detach_task costs: %dns\n", maxl, maxI, mdelta);
     fprintf(stderr, "max set_task_cpu: %d ns, index: %d, detach_task costs: %dns\n", maxl2, maxI2, mdelta2);
+    fprintf(stderr, "max dequeue_task_fair: %d ns, index: %d, deactivate_task costs: %dns\n", maxl3, maxI3, mdelta3);
 }
 
 /*
@@ -462,7 +523,8 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
 
     if (unlikely(res.nr_cpu_ev[e->cpu] >= NR_ENTRY_PERCPU)) {
         fprintf(stderr, "WARN: Buffer for CPU%d has no space left\n", e->cpu);
-        return 0; /* if we return negavite val, other CPUs event  */
+        /* if we return negavite val, other CPUs event may get discarded */
+        return 0;
     }
 
     /* FIXME this abstraction looks nasty, put nr_cpu_ev into struct `cpu` and rename to nr_ev */
@@ -498,7 +560,7 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         *last_state = CRLUT_S;
         break;
     case CRLUT_E:
-        if (unlikely(*last_state != CRLUT_S))
+        if (unlikely(*last_state != DEQ_TASK_CLS_S))
             break;
         idx = pe->dts[pe->nr_dts].nr_dt; // no need to update as it's DETACH_TASK_E's job
         /* no way this can greater than MAX_NR_MIGRATION */
@@ -506,6 +568,66 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         pe->dts[pe->nr_dts].dt[idx].crl_e = e->ts;
         *last_state = CRLUT_E;
         break;
+    case DEQ_TASK_CLS_S:// XXX for god's sake, if we change event SIDPD_E, change this cond. too
+        if (unlikely(*last_state != CRLUT_S && *last_state != SIDPD_E))
+            break;
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].dtc_s = e->ts;
+        *last_state = DEQ_TASK_CLS_S;
+        break;
+    case SCD_E:
+        if (unlikely(*last_state != CRLUT_S))
+            break;
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].scd_e = e->ts;
+        *last_state = SCD_E;
+        break;
+    case URC_S:
+/* in case that sched_core_enabled() is not enabled, 2nd cond. will be used */
+/* XXX but hey! what if buffer overrun occured at the same time, we wont notice then */
+        if (unlikely(*last_state != SCD_E && *last_state != CRLUT_S))
+            break;
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].urc_s = e->ts;
+        *last_state = URC_S;
+        break;
+    case URC_E:
+        if (unlikely(*last_state != URC_S))
+            break;
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].urc_e = e->ts;
+        *last_state = URC_E;
+        break;
+    case SIDPD_S: /* if the trace missed any buffer overrun event, it's likely bacause of me, look how many states I've compromised */
+        if (unlikely(*last_state != URC_E && *last_state != SCD_E &&
+            *last_state != CRLUT_S))
+            break;
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].sidpd_s = e->ts;
+        *last_state = SIDPD_S;
+        break;
+    case SIDPD_E:
+        if (unlikely(*last_state != SIDPD_S))
+            break;
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].sidpd_e = e->ts;
+        *last_state = SIDPD_E;
+        break;
+/*    case DEQ_TASK_CLS_E: THIS CAN BE FOLD INTO crl_e, HENCE 
+        if (unlikely(*last_state != DEQ_TASK_CLS_S))
+            break;
+        idx = pe->dts[pe->nr_dts].nr_dt;
+        assert(idx <= MAX_NR_MIGRATION);
+        pe->dts[pe->nr_dts].dt[idx].dtc_e = e->ts;
+        *last_state = DEQ_TASK_CLS_E;
+        break;*/
+/* comment out unsed event for now
     case CMT_S:
         idx = pe->dts[pe->nr_dts].nr_cmt;
         assert(idx <= MAX_NR_MIGRATION);
@@ -528,6 +650,7 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         pe->dts[pe->nr_dts].thl[*idx_p].e = e->ts;
         (*idx_p)++;
         break;
+*/
     case DETACH_TASKS_S: /* load_balance may call this multiple times */
         if (unlikely(*last_state != KP_LB))
             break;
@@ -658,6 +781,7 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         *last_state = LB_E;
 
         res.nr_cpu_ev[e->cpu]++;
+        //fprintf(stderr, "cpu%d nr_cpu_ev: %d\n", e->cpu, res.nr_cpu_ev[e->cpu]);
 
         break;
     default:
@@ -752,7 +876,7 @@ int main(int ac, char *av[])
     }
 
     /* to timely check BPF_STATS */
- //   system("../tools/bpftool prog list > bpftool_list_res");
+    system("../tools/bpftool prog list > bpftool_list_res");
 
     report_result();
 

@@ -67,6 +67,13 @@ enum lb_ev_type {
     DETACH_TASK_E,
     DETACH_TASKS_S,
     DETACH_TASKS_E,
+    DEQ_TASK_CLS_S, /* dequeue_task - this is sched class spcific */
+    DEQ_TASK_CLS_E,
+    SCD_E, /* sched_core_dequeue - use CRLUT_S as the start event */
+    URC_S, /* update_rq_clock */
+    URC_E,
+    SIDPD_S, /* sched_info_dequeue and psi_dequeue */
+    SIDPD_E,
     KP_LB, /* kprobe load_balance */
     LB_E, /* load_balance end */
     NR_EVENT,
