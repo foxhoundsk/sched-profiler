@@ -4,7 +4,7 @@ LLVM_STRIP ?= llvm-strip
 BPFTOOL ?= $(abspath ../tools/bpftool)
 
 # FIXME: path/to/patched/kernel/tree
-TREE:= $(abspath /home/arch/libbpf)
+TREE:= $(abspath /home/dces4212/project/linux)
 LIBBPF_SRC := $(abspath $(TREE)/tools/lib/bpf/)
 
 # NOTE: this libbpf.a should be sched bpf flavored object
@@ -13,11 +13,11 @@ INCLUDES := -I$(OUTPUT) -I$(TREE)/tools/lib
 PER_KERN_HEADER := $(OUTPUT)/vmlinux.h
 
 # the last flag is for the sake of __builtin_expect
-CFLAGS := -g -Wall -freorder-blocks
+CFLAGS := -g -Wall -freorder-blocks -lstdc++ -pthread
 COMMON_FLAGS :=
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
-THIRD_PARTY_USER_SRCS := trace_helpers.c
+THIRD_PARTY_USER_SRCS := trace_helpers.c perfetto.cc
 
 APPS = time_in_rq time_in_lb
 
