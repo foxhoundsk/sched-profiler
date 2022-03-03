@@ -8,47 +8,32 @@
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
-#define KERN_STACKID_FLAGS (0 | BPF_F_REUSE_STACKID)
+
 /* sched BPF requires this */
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 /* BPF ringbuf map */
-
+/*
 struct {
         __uint(type, BPF_MAP_TYPE_RINGBUF);
-        __uint(max_entries, 1024 * 1024  /* 1MB */ ); 
+        __uint(max_entries, 1 * 1024 * 1024); 
 } rb SEC(".maps");
-
+*/
 
 /* CAUTION: PERCPU_ARRAY has size limitation of 32KB (per entry) */
 /* https://elixir.bootlin.com/linux/v5.15/source/include/linux/percpu.h#L23 */
 /* https://elixir.bootlin.com/linux/v5.15/source/mm/percpu.c#L1756 */
 
 struct {
-        __uint(type, BPF_MAP_TYPE_STACK_TRACE);
-        __uint(key_size, sizeof(u32));
-        __uint(value_size, PERF_MAX_STACK_DEPTH * sizeof(u64));
-        __uint(max_entries, 50000);
-} stackmap SEC(".maps");
-/*
-struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 	__uint(key_size, sizeof(int));
 	__uint(value_size, sizeof(int));
 } pb SEC(".maps");
-*/
-#ifdef DEBUG
-/*
- * @dropped
- *
- * monitor whether the backlog is big enough. (BPF ringbuf uses a lightweight.
- * spinlock internally, can we keep up with this in sched code path?)
- *
- * btw, should we align up to 128 bytes instead of 64 bytes to prevent
- * false-sharing?
- */
-unsigned long dropped __attribute__((aligned(128))) = 0;
-#endif
+
+/* for buffer overrun detection */
+unsigned long dropped __attribute__((aligned(64))) = 0;
+
+bool start_tracing = false;
 
 /*
  * this should be nproc of target machine, however, IIUC, this is not
@@ -72,424 +57,160 @@ struct sched_switch_args {
 	int next_pid;
 	int next_prio;
 };
-/*
-SEC("tracepoint/sched/sched_switch")
-int do_lb_end(struct sched_switch_args *ctx)
-{
-    int pid = ctx->prev_pid;
 
-    __u32 cpu = bpf_get_smp_processor_id();
-    if (__sync_fetch_and_add(&tf, 0) == -1)
-        __sync_fetch_and_add(&tf, pid);
-    return 0;
-}
-*/
-/*
-SEC("raw_tp/sched_detach_one_task_start")
-int dt_start(struct bpf_raw_tracepoint_args *ctx)
+SEC("raw_tp/sched_pick_next_task_s")
+int pnt_s(struct bpf_raw_tracepoint_args *ctx)
 {
+    if (unlikely(!start_tracing))
+        return 0;
+
     struct lb_event e = {};
 
-    e.type = DETACH_TASK_S;
+    e.type = PNT_S;
     e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
+
+    if (bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e)))
+        __sync_fetch_and_add(&dropped, 1);
 
     return 0;
 }
-
-SEC("raw_tp/sched_detach_one_task_end")
-int dt_end(struct bpf_raw_tracepoint_args *ctx)
+SEC("raw_tp/sched_pick_next_task_e")
+int pnt_e(struct bpf_raw_tracepoint_args *ctx)
 {
+    if (unlikely(!start_tracing))
+        return 0;
+
     struct lb_event e = {};
 
-    e.type = DETACH_TASK_E;
+    e.type = PNT_E;
     e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
+
+    if (bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e)))
+        __sync_fetch_and_add(&dropped, 1);
 
     return 0;
 }
-*/
-//SEC("sched/detach_tasks_start")
-SEC("raw_tp/sched_detach_tasks_start")
-int dts_start(struct bpf_raw_tracepoint_args *ctx)
+SEC("raw_tp/sched_pick_next_ent_s")
+int pne_s(struct bpf_raw_tracepoint_args *ctx)
+{
+    if (unlikely(!start_tracing))
+        return 0;
+
+    struct lb_event e = {};
+
+    e.type = PNE_S;
+    e.ts = bpf_ktime_get_ns();
+
+    if (bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e)))
+        __sync_fetch_and_add(&dropped, 1);
+
+    return 0;
+}
+SEC("raw_tp/sched_pick_next_ent_e")
+int pne_e(struct bpf_raw_tracepoint_args *ctx)
+{
+    if (unlikely(!start_tracing))
+        return 0;
+
+    struct lb_event e = {};
+
+    e.type = PNE_E;
+    e.ts = bpf_ktime_get_ns();
+
+    if (bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e)))
+        __sync_fetch_and_add(&dropped, 1);
+
+    return 0;
+}
+/* *** ringbuf specific
+SEC("raw_tp/sched_pick_next_task_s")
+int pnt_s(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
+    int cpu = bpf_get_smp_processor_id();
+    if (CPU_OF_INTEREST != bpf_get_smp_processor_id())
         return 0;
 
-    e->type = DETACH_TASKS_S;
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    
+    e->type = PNT_S;
     e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
+    e->cpu = cpu;
     bpf_ringbuf_submit(e, 0);
 
     return 0;
 }
 
-SEC("raw_tp/sched_detach_tasks_end")
-int dts_end(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = DETACH_TASKS_E;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-SEC("raw_tp/sched_crlut_s")
-int crlut_start(struct bpf_raw_tracepoint_args *ctx)
-//int BPF_PROG(crlut_start)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = CRLUT_S;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-
-SEC("raw_tp/sched_crlut_e")
-int crlut_end(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = CRLUT_E;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-
-SEC("raw_tp/sched_stc_e")
-int BPF_PROG(stc_end)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = STC_E;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-
-SEC("raw_tp/sched_deq_task_s")
-int deq_task_cls_start(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = DEQ_TASK_CLS_S;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-SEC("raw_tp/sched_scd_e")
-int scd_end(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = SCD_E;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-SEC("raw_tp/sched_urc_s")
-int BPF_PROG(urc_s)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = URC_S;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-
-SEC("raw_tp/sched_urc_e")
+SEC("raw_tp/sched_pick_next_task_e")
 int urc_e(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
+    int cpu = bpf_get_smp_processor_id();
+    if (CPU_OF_INTEREST != bpf_get_smp_processor_id())
         return 0;
 
-    e->type = URC_E;
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    e->type = PNT_E;
     e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
+    e->cpu = cpu;
     bpf_ringbuf_submit(e, 0);
 
     return 0;
 }
-SEC("raw_tp/sched_sidpd_s")
-int BPF_PROG(sidpd_s)
+SEC("raw_tp/sched_pick_next_ent_s")
+int pne_s(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
+    int cpu = bpf_get_smp_processor_id();
+    if (CPU_OF_INTEREST != bpf_get_smp_processor_id())
         return 0;
 
-    e->type = SIDPD_S;
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    e->type = PNE_S;
     e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
+    e->cpu = cpu;
     bpf_ringbuf_submit(e, 0);
 
     return 0;
 }
 
-SEC("raw_tp/sched_sidpd_e")
-int sched_sidpd_e(struct bpf_raw_tracepoint_args *ctx)
+SEC("raw_tp/sched_pick_next_ent_e")
+int pne_e(struct bpf_raw_tracepoint_args *ctx)
 {
     struct lb_event *e;
 
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
+    int cpu = bpf_get_smp_processor_id();
+    if (CPU_OF_INTEREST != bpf_get_smp_processor_id())
         return 0;
 
-    e->type = SIDPD_E;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-/*
-SEC("raw_tp/sched_deq_task_e")
-int deq_task_cls_end(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event *e;
-
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
         return 0;
+    }
 
-    e->type = DEQ_TASK_CLS_E;
+    e->type = PNE_E;
     e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
+    e->cpu = cpu;
     bpf_ringbuf_submit(e, 0);
 
     return 0;
 }*/
-/*
-SEC("raw_tp/sched_cmt_s")
-int cmt_s(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = CMT_S;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-    return 0;
-}
-
-SEC("raw_tp/sched_cmt_e")
-int cmt_e(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = CMT_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-    return 0;
-}
-
-SEC("raw_tp/sched_thl_s")
-int thl_s(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = THL_S;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("raw_tp/sched_thl_e")
-int thl_e(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = THL_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("raw_tp/sched_ats_s")
-int ats_s(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = ATS_S;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("raw_tp/sched_ats_e")
-int ats_e(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = ATS_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("raw_tp/sched_socn_s")
-int socn_s(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = SOCN_S;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("raw_tp/sched_socn_e")
-int socn_e(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = SOCN_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("raw_tp/sched_fbq_s")
-int fbq_s(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = FBQ_S;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("raw_tp/sched_fbq_e")
-int fbq_e(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = FBQ_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("kprobe/find_busiest_group")
-int fbg_s(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = FBG_S;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-
-SEC("kretprobe/find_busiest_group")
-int fbg_e(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event e = {};
-
-    e.type = FBG_E;
-    e.ts = bpf_ktime_get_ns();
-    bpf_perf_event_output(ctx, &pb, BPF_F_CURRENT_CPU, &e, sizeof(e));
-
-    return 0;
-}
-*/
-SEC("kprobe/load_balance")
-int do_lb_start(struct pt_regs *ctx)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = KP_LB;
-    /* TODO figure out the flag, why duplicated callstack can co-exist */
-    e->stack_id = bpf_get_stackid(ctx, &stackmap, 0);
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-
-/*
- * hook location:
- * https://elixir.bootlin.com/linux/v5.14/source/kernel/sched/fair.c#L9734
- */
-SEC("raw_tp/sched_lb_end")
-int lb_end(struct bpf_raw_tracepoint_args *ctx)
-{
-    struct lb_event *e;
-
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    e->type = LB_E;
-    e->ts = bpf_ktime_get_ns();
-    e->cpu = bpf_get_smp_processor_id();
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
-}
-

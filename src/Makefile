@@ -13,13 +13,13 @@ INCLUDES := -I$(OUTPUT) -I$(TREE)/tools/lib
 PER_KERN_HEADER := $(OUTPUT)/vmlinux.h
 
 # the last flag is for the sake of __builtin_expect
-CFLAGS := -g -Wall -freorder-blocks -lstdc++ -pthread
+CFLAGS := -Wall -freorder-blocks -lstdc++ -pthread
 COMMON_FLAGS :=
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
 THIRD_PARTY_USER_SRCS := trace_helpers.c perfetto.cc
 
-APPS = time_in_rq time_in_lb
+APPS = time_in_lb
 
 ifeq ($(V),1)
         Q =
@@ -48,15 +48,15 @@ $(OUTPUT) $(OUTPUT)/libbpf:
 # Build final application
 $(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(THIRD_PARTY_USER_SRCS) | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $^ -lelf -lz -o $@
+	$(Q) g++ $(CFLAGS) $^ -lelf -lz -o $@
 
 $(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
 
 # Build user-space code
-$(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
+$(OUTPUT)/%.o: %.cc $(wildcard %.h) | $(OUTPUT)
 	$(call msg,CC,$@)
-	$(Q)$(CC) $(CFLAGS) $(COMMON_FLAGS) $(INCLUDES) \
-		-c $(filter %.c,$^) -o $@
+	$(Q) g++ $(CFLAGS) $(COMMON_FLAGS) $(INCLUDES) \
+		-c $(filter %.cc,$^) -o $@
 
 # Generate BPF skeletons
 $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT)

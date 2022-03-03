@@ -8,9 +8,11 @@
 #define HIST_MAP_BUCKET_SZ 16
 #define PERF_MAX_STACK_DEPTH 127 /* from /usr/include/linux/perf_event.h */
 #define NPROC 16 /* power of 2 */
+#define CPU_OF_INTEREST 0
 
 /* hardcoded 64-byte cacheline alignment */
-#define __cacheline_aligned __attribute__ ((aligned(64)))
+#define CACHE_LINE_SIZE 64
+#define __cacheline_aligned __attribute__ ((aligned(CACHE_LINE_SIZE)))
 
 struct rq_event {
     int pid;
@@ -76,15 +78,28 @@ enum lb_ev_type {
     SIDPD_E,
     KP_LB, /* kprobe load_balance */
     LB_E, /* load_balance end */
+
+    PNT_S, /* pick_next_task_fair */
+    PNT_E,
+    PNE_S, /* pick_next_entity */
+    PNE_E,
+
     NR_EVENT,
 };
 
 struct lb_event {
     enum lb_ev_type type;
     long ts;
-    long stack_id;
-    int cpu;
 };
+
+/*
+ * identical to lb_event except for the cpu field, which perfbuf API already has one
+ */
+typedef struct {
+    enum lb_ev_type type;
+    long ts;
+    int cpu;
+} event_t;
 
 static unsigned int to_log2(unsigned int v)
 {
