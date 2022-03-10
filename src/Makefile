@@ -3,16 +3,13 @@ CLANG ?= clang
 LLVM_STRIP ?= llvm-strip
 BPFTOOL ?= $(abspath ../tools/bpftool)
 
-# FIXME: path/to/patched/kernel/tree
-TREE:= $(abspath /home/dces4212/project/linux)
-LIBBPF_SRC := $(abspath $(TREE)/tools/lib/bpf/)
+LIBBPF_SRC := $(abspath ../libbpf/src)
 
-# NOTE: this libbpf.a should be sched bpf flavored object
-LIBBPF_OBJ := $(abspath $(TREE)/tools/lib/bpf/libbpf.a)
-INCLUDES := -I$(OUTPUT) -I$(TREE)/tools/lib 
+LIBBPF_OBJ := $(abspath ../libbpf/libbpf.a)
+INCLUDES := -I$(OUTPUT) -I$(abspath $(LIBBPF_SRC)/../)
 PER_KERN_HEADER := $(OUTPUT)/vmlinux.h
 
-# the last flag is for the sake of __builtin_expect
+# -freorder-blocks is for the sake of __builtin_expect
 CFLAGS := -Wall -freorder-blocks -lstdc++ -pthread
 COMMON_FLAGS :=
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
