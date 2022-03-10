@@ -7,8 +7,6 @@
 #define RQ_EVENT_SZ 1024
 #define HIST_MAP_BUCKET_SZ 16
 #define PERF_MAX_STACK_DEPTH 127 /* from /usr/include/linux/perf_event.h */
-#define NPROC 16 /* power of 2 */
-#define CPU_OF_INTEREST 0
 
 /* hardcoded 64-byte cacheline alignment */
 #define CACHE_LINE_SIZE 64
@@ -50,35 +48,6 @@ struct percpu_event {
 
 /* S: start, E: end */
 enum lb_ev_type {
-    THL_S, /* task_h_load */
-    THL_E,
-    CMT_S, /* can_migrate_task */
-    CMT_E,
-    ATS_S, /* attach_tasks */
-    ATS_E,
-    SOCN_S, /* stop_one_cpu_nowait */
-    SOCN_E,
-    FBQ_S, /* find_busiest_queue */
-    FBQ_E,
-    FBG_S, /* find_busiest_group */
-    FBG_E,
-    CRLUT_S, /* cfs_rq_last_update_time */
-    CRLUT_E,
-    STC_E, /* set_task_cpu (use CRLUT_E as the start event) */
-    DETACH_TASK_S,
-    DETACH_TASK_E,
-    DETACH_TASKS_S,
-    DETACH_TASKS_E,
-    DEQ_TASK_CLS_S, /* dequeue_task - this is sched class spcific */
-    DEQ_TASK_CLS_E,
-    SCD_E, /* sched_core_dequeue - use CRLUT_S as the start event */
-    URC_S, /* update_rq_clock */
-    URC_E,
-    SIDPD_S, /* sched_info_dequeue and psi_dequeue */
-    SIDPD_E,
-    KP_LB, /* kprobe load_balance */
-    LB_E, /* load_balance end */
-
     PNT_S, /* pick_next_task_fair */
     PNT_E,
     PNE_S, /* pick_next_entity */

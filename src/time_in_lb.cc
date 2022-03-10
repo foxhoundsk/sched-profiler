@@ -17,7 +17,12 @@
 #include "common.h"
 #include "trace_helpers.h"
 #include "time_in_lb.skel.h"
-#include "SPSCQueue.h"
+
+/*
+ * As long as BPF map can keep up with the sched event rate, this ringbuf is
+ * not necessary.
+ */
+//#include "SPSCQueue.h"
 
 #include <time.h>
 
@@ -27,7 +32,7 @@
 
 PERFETTO_DEFINE_CATEGORIES(
     perfetto::Category("sched")
-        .SetDescription("CPU Scheduler events"));
+        .SetDescription("CPU Scheduler event"));
 
 /* init static storage for the categories */
 PERFETTO_TRACK_EVENT_STATIC_STORAGE();
@@ -62,8 +67,8 @@ static volatile bool exiting = false;
 static struct time_in_lb_bpf *skel;
 static int nproc;
 static struct result res;
-static rigtorp::SPSCQueue<event_t> buf(EVENT_RINGBUF_SZ);
-static int trace_fd;
+//static rigtorp::SPSCQueue<event_t> buf(EVENT_RINGBUF_SZ);
+//static int trace_fd;
 
 /* occupies 2 cachelines so that vars after this won't involve false-sharing
  * either.
@@ -136,27 +141,94 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
 {
     const struct lb_event *e = (struct lb_event*) data;
-    buf.emplace((event_t) {.type = e->type, .ts = e->ts, .cpu = cpu});
+    enum lb_ev_type *last_state = &res.cpu_last_state[cpu];
+    cpu++; /* to shift the index to appropriate perfetto track */
+
+    switch (e->type) {
+    case PNT_S:
+        if (unlikely(*last_state != PNT_E))
+            fprintf(stderr, "Possible buffer overrun occurred at CPU%d\n",
+                    cpu);
+
+        //buf.emplace((event_t) {.type = PNT_S, .ts = e->ts, .cpu = cpu});
+        TRACE_EVENT_BEGIN("sched", "pick_next_task_fair", perfetto::Track(cpu), (uint64_t) e->ts);
+        *last_state = PNT_S;
+
+        break;
+    case PNE_S:
+        if (unlikely(*last_state != PNT_S)) {
+            /* to prevent unintended caller, but then we're risking
+             * lost of possible buffer overrun event.
+             */
+            break;
+        }
+
+        //buf.emplace((event_t) {.type = PNE_S, .ts = e->ts, .cpu = cpu});
+        TRACE_EVENT_BEGIN("sched", "pick_next_entity", perfetto::Track(cpu), (uint64_t) e->ts);
+        *last_state = PNE_S;
+
+        break;
+    case PNE_E:
+        if (unlikely(*last_state != PNE_S)) {
+            break;
+        }
+
+        //buf.emplace((event_t) {.type = PNE_E, .ts = e->ts, .cpu = cpu});
+        TRACE_EVENT_END("sched", perfetto::Track(cpu), (uint64_t) e->ts);
+        *last_state = PNE_E;
+
+        break;
+    case PNT_E:
+        if (unlikely(*last_state != PNT_S && *last_state != PNE_E)) {
+            fprintf(stderr, "Possible buffer overrun occurred at CPU%d\n",
+                    cpu);
+            break;
+        }
+
+        //buf.emplace((event_t) {.type = PNT_E, .ts = e->ts, .cpu = cpu});
+        TRACE_EVENT_END("sched", perfetto::Track(cpu), (uint64_t) e->ts);
+        *last_state = PNT_E;
+
+        break;
+    }
 }
 
 std::unique_ptr<perfetto::TracingSession> StartTracing() {
-  // The trace config defines which types of data sources are enabled for
-  // recording. In this example we just need the "track_event" data source,
-  // which corresponds to the TRACE_EVENT trace points.
-  perfetto::TraceConfig cfg;
-  cfg.set_duration_ms((uint32_t) 1000 * 30);
-  cfg.set_write_into_file(true);
-//  cfg.set_output_path(TRACE_FILENAME);
-  auto buffer_cfg = cfg.add_buffers();
-  buffer_cfg->set_size_kb(1024 * 1024);
-  buffer_cfg->set_fill_policy(perfetto::TraceConfig::BufferConfig::RING_BUFFER);
-  auto* ds_cfg = cfg.add_data_sources()->mutable_config();
-  ds_cfg->set_name("track_event");
+    // The trace config defines which types of data sources are enabled for
+    // recording. In this example we just need the "track_event" data source,
+    // which corresponds to the TRACE_EVENT trace points.
+    perfetto::TraceConfig cfg;
+    cfg.set_duration_ms((uint32_t) 1000 * 180);
+    cfg.set_write_into_file(true);
+    cfg.set_output_path(TRACE_FILENAME);
+    cfg.set_flush_period_ms(250);
 
-  auto tracing_session = perfetto::Tracing::NewTrace();
-  tracing_session->Setup(cfg, trace_fd);
-  tracing_session->StartBlocking();
-  return tracing_session;
+    /* TODO currently confused with this knob, the higher it is, the higher the
+     * likelihood calling to TRACE_EVENT_*() would stall. The confusion is,
+     * this knob should have nothing to do with the shmem, what it affects is
+     * the central buffer, which we currently have 2GB for it, i.e., it should
+     * have no affect on the overrun of the shmem buffer.
+     *
+     * It should be noted that if the stall duration is too long, Perfetto
+     * would consider there is a possible deadlock, and stop the application
+     * abnormaly.
+     *
+     * Plus, the flush period should be as longer as possible, since we want
+     * minimal interference to the machine being traced.
+     */
+    cfg.set_file_write_period_ms(3500);
+
+    auto buffer_cfg = cfg.add_buffers();
+    buffer_cfg->set_size_kb(1024 * 1024 * 2);
+    auto ds = cfg.add_data_sources();
+    auto ds_cfg = ds->mutable_config();
+    ds_cfg->set_name("track_event");
+    // ds_cfg->kBufferExhaustedPolicy = perfetto::BufferExhaustedPolicy::kStall;
+
+    auto tracing_session = perfetto::Tracing::NewTrace();
+    tracing_session->Setup(cfg);
+    tracing_session->StartBlocking();
+    return tracing_session;
 }
 
 void StopTracing(std::unique_ptr<perfetto::TracingSession> tracing_session) {
@@ -181,105 +253,71 @@ void StopTracing(std::unique_ptr<perfetto::TracingSession> tracing_session) {
 std::unique_ptr<perfetto::TracingSession> init_perfetto(void)
 {
     perfetto::TracingInitArgs args;
-    args.shmem_size_hint_kb = 1024 * 1024 * 8;
+
+    /* must below 32MB, or it's ignored */
+    args.shmem_size_hint_kb = 1024 * 32;
+
     args.backends = perfetto::kInProcessBackend;
-    args.shmem_batch_commits_duration_ms = 1000 * 5;
+ //   args.
     perfetto::Tracing::Initialize(args);
 
-    /* init track events, e.g. track for "CPU 0" and so on */
+    /* init track events */
     perfetto::TrackEvent::Register();
 
     return StartTracing();
 }
 
-/* TODO move event filtering logic back to perfbuf cb to reduce traffic in the ringbuf */
+/*
 static void* buf_consumer(void *d __attribute__((unused)))
 {
     while (likely(!worker_should_exit)) {
         do {
 keep_working:
             auto *e = buf.front();
+
             if (likely(e != nullptr)) {
                 enum lb_ev_type *last_state = &res.cpu_last_state[e->cpu];
 
                 switch (e->type) {
                 case PNT_S:
-                    if (unlikely(*last_state != PNT_E))
-                        fprintf(stderr, "Possible buffer overrun occurred at CPU%d\n",
-                                e->cpu);
-
                     TRACE_EVENT_BEGIN("sched", "pick_next_task_fair", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    *last_state = PNT_S;
-
                     break;
                 case PNE_S:
-                    if (unlikely(*last_state != PNT_S)) {
-                        /* to prevent unintended caller, but then we're risking
-                         * lost of possible buffer overrun event.
-                         */
-                        break;
-                    }
-
                     TRACE_EVENT_BEGIN("sched", "pick_next_entity", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    *last_state = PNE_S;
-
                     break;
                 case PNE_E:
-                    if (unlikely(*last_state != PNE_S)) {
-                        break;
-                    }
-
                     TRACE_EVENT_END("sched", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    *last_state = PNE_E;
-
                     break;
                 case PNT_E:
-                    if (unlikely(*last_state != PNT_S && *last_state != PNE_E)) {
-                        fprintf(stderr, "Possible buffer overrun occurred at CPU%d\n",
-                                e->cpu);
-                        break;
-                    }
-
                     TRACE_EVENT_END("sched", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    *last_state = PNT_E;
-
                     break;
                 }
 
                 buf.pop();
 
-                /* it's likely that we have enormous events to process */
+                // it's likely that we have enormous events to process
                 goto keep_working;
             }
         } while (likely(!buf.empty()));
-        /* we seldom reach here as the sched events happens very frequent.
-         * Have been considering placing pthread_yield() here, but the manpage
-         * says that it should only be used in sched policies other than
-         * SCHED_OTHERS.
-         */
+        // FIXME we seldom reach here as the sched events happens very frequent.
+        // Have been considering placing pthread_yield() here, but the manpage
+        // says that it should only be used in sched policies other than
+        // SCHED_OTHERS. Do we have better mechanism for scenario where the
+        // event rate is low?
+
     }
 
     fprintf(stderr, "worker has stopped\n");
 }
-
+*/
 int main(int ac, char *av[])
 {
     int err;
     struct perf_buffer *pb = NULL;
     struct perf_buffer_opts pb_opts = {};
-    unsigned int target_ev = LB_EVENT_SZ;
-    pthread_t worker;
+    //pthread_t worker;
 
-    trace_fd = open(TRACE_FILENAME, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
-    if (trace_fd < 0) {
-        perror("Failed to create fd for trace file");
-        return -1;
-    }
-
- //   libbpf_set_print(libbpf_print_fn);
-
-    if (ac == 2)
-        target_ev = atoi(av[1]);
+    //libbpf_set_print(libbpf_print_fn);
 
     auto tracing_session = init_perfetto();
     if (tracing_session == nullptr) {
@@ -287,16 +325,16 @@ int main(int ac, char *av[])
         return -1;
     }
 
-    pthread_create(&worker, NULL, buf_consumer, NULL);
+    //pthread_create(&worker, NULL, buf_consumer, NULL);
 
     bump_memlock_rlimit();
 
     nproc = get_nprocs_conf();
 
-    /* rename perfetto track to CPU specific */
-    for (int i = 0; i < nproc; i++) {
+    /* rename perfetto track for each CPU */
+    for (int i = 1; i < nproc + 1; i++) {
         char cpu[] = "CPUXXX"; // 3 digits should do the trick
-        snprintf(cpu, sizeof(cpu), "CPU%d", i);
+        snprintf(cpu, sizeof(cpu), "CPU%d", i - 1);
         auto desc = perfetto::Track(i).Serialize();
         desc.set_name(cpu);
         perfetto::TrackEvent::SetTrackDescriptor(perfetto::Track(i), desc);
@@ -334,7 +372,7 @@ int main(int ac, char *av[])
         return -1;
     }
 
-    /* FIXME unless otherwise necessary, this can shrink into time_in_lb_bpf__open_and_load */
+    /* unless otherwise necessary, this can shrink into time_in_lb_bpf__open_and_load */
     err = time_in_lb_bpf__load(skel);
     if (err) {
         fprintf(stderr, "Failed to load BPF program\n");
@@ -363,10 +401,10 @@ int main(int ac, char *av[])
     while (!exiting) {
         perf_buffer__poll(pb, 100 /* timeout, ms */);
     }
-
+/*
     worker_should_exit = true;
     pthread_join(worker, NULL);
-
+*/
     /* to timely check BPF_STATS */
     system("../tools/bpftool prog list > bpftool_list_res");
 
@@ -386,7 +424,8 @@ cleanup:
     free(res.nr_cpu_ev);
 
     StopTracing(std::move(tracing_session));
-    close(trace_fd);
+
+    //close(trace_fd);
 
     return err < 0 ? -err : 0;
 }

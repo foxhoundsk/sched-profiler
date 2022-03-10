@@ -33,7 +33,7 @@ struct {
 /* for buffer overrun detection */
 unsigned long dropped __attribute__((aligned(64))) = 0;
 
-bool start_tracing = false;
+volatile bool start_tracing = false;
 
 /*
  * this should be nproc of target machine, however, IIUC, this is not
