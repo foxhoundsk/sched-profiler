@@ -48,10 +48,31 @@ struct percpu_event {
 
 /* S: start, E: end */
 enum lb_ev_type {
-    PNT_S, /* pick_next_task_fair */
+    RRD_S, /* run_rebalance_domains */
+    RRD_E,
+    NIB_S, /* nohz_idle_balance */
+    NIB_E,
+    N_IB_S, /* _nohz_idle_balance */
+    N_IB_E,
+    RD_S, /* rebalance_domains */
+    RD_E,
+    LB_S, /* load_balance */
+    LB_E,
+    DT_S, /* detach_tasks */
+    DT_E,
+    AT_S, /* attach_tasks */
+    AT_E,
+    ST_S, /* scheduler_tick */
+    ST_E,
+    TTF_S, /* task_tick_fair */
+    TTF_E,
+    SCHED_S, /* schedule */
+    SCHED_E,
+    S_CHED_S, /* __schedule */
+    S_CHED_E,
+    PNT_S, /* pick_next_task */
     PNT_E,
-    PNE_S, /* pick_next_entity */
-    PNE_E,
+    TLB_S, /* trigger_load_balance (paired with RRD_E) */
 
     NR_EVENT,
 };

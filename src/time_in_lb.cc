@@ -69,6 +69,20 @@ static int nproc;
 static struct result res;
 //static rigtorp::SPSCQueue<event_t> buf(EVENT_RINGBUF_SZ);
 //static int trace_fd;
+static const char *func_name[] = {
+    "run_rebalance_domains",
+    "nohz_idle_balance",
+    "_nohz_idle_balance",
+    "rebalance_domains",
+    "load_balance",
+    "detach_tasks",
+    "attach_tasks",
+    "scheduler_tick",
+    "task_tick_fair",
+    "schedule",
+    "__schedule",
+    "pick_next_task",
+};
 
 /* occupies 2 cachelines so that vars after this won't involve false-sharing
  * either.
@@ -141,55 +155,60 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
 {
     const struct lb_event *e = (struct lb_event*) data;
-    enum lb_ev_type *last_state = &res.cpu_last_state[cpu];
+    //enum lb_ev_type *last_state = &res.cpu_last_state[cpu];
     cpu++; /* to shift the index to appropriate perfetto track */
 
-    switch (e->type) {
-    case PNT_S:
-        if (unlikely(*last_state != PNT_E))
-            fprintf(stderr, "Possible buffer overrun occurred at CPU%d\n",
-                    cpu);
-
-        //buf.emplace((event_t) {.type = PNT_S, .ts = e->ts, .cpu = cpu});
-        TRACE_EVENT_BEGIN("sched", "pick_next_task_fair", perfetto::Track(cpu), (uint64_t) e->ts);
-        *last_state = PNT_S;
-
-        break;
-    case PNE_S:
-        if (unlikely(*last_state != PNT_S)) {
-            /* to prevent unintended caller, but then we're risking
-             * lost of possible buffer overrun event.
-             */
-            break;
-        }
-
-        //buf.emplace((event_t) {.type = PNE_S, .ts = e->ts, .cpu = cpu});
-        TRACE_EVENT_BEGIN("sched", "pick_next_entity", perfetto::Track(cpu), (uint64_t) e->ts);
-        *last_state = PNE_S;
-
-        break;
-    case PNE_E:
-        if (unlikely(*last_state != PNE_S)) {
-            break;
-        }
-
-        //buf.emplace((event_t) {.type = PNE_E, .ts = e->ts, .cpu = cpu});
+    if (e->type & 0x1) { /* end event */
         TRACE_EVENT_END("sched", perfetto::Track(cpu), (uint64_t) e->ts);
-        *last_state = PNE_E;
-
-        break;
-    case PNT_E:
-        if (unlikely(*last_state != PNT_S && *last_state != PNE_E)) {
-            fprintf(stderr, "Possible buffer overrun occurred at CPU%d\n",
-                    cpu);
+            if (unlikely(e->type == RRD_E)) /* to bound trigger_load_balance */
+                TRACE_EVENT_END("sched", perfetto::Track(cpu), (uint64_t) e->ts);
+    } else {
+        switch (e->type) {
+        /* TODO is there a way to pass the const funcname with an const array
+         * or somehow? Have tried using const char[], but Perfetto doesn't
+         * accept :( this forces us to use switch-case, which makes the code
+         * lengthy.
+         */
+        case RRD_S:
+            TRACE_EVENT_BEGIN("sched", "run_rebalance_domains", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case NIB_S:
+            TRACE_EVENT_BEGIN("sched", "nohz_idle_balance", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case N_IB_S:
+            TRACE_EVENT_BEGIN("sched", "_nohz_idle_balance", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case RD_S:
+            TRACE_EVENT_BEGIN("sched", "rebalance_domains", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case LB_S:
+            TRACE_EVENT_BEGIN("sched", "load_balance", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case DT_S:
+            TRACE_EVENT_BEGIN("sched", "detach_tasks", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case AT_S:
+            TRACE_EVENT_BEGIN("sched", "attach_tasks", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case ST_S:
+            TRACE_EVENT_BEGIN("sched", "scheduler_tick", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case TTF_S:
+            TRACE_EVENT_BEGIN("sched", "task_tick_fair", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case SCHED_S:
+            TRACE_EVENT_BEGIN("sched", "schedule", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case S_CHED_S:
+            TRACE_EVENT_BEGIN("sched", "__schedule", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case PNT_S:
+            TRACE_EVENT_BEGIN("sched", "pick_next_task", perfetto::Track(cpu), (uint64_t) e->ts);
+            break;
+        case TLB_S:
+            TRACE_EVENT_BEGIN("sched", "trigger_load_balance", perfetto::Track(cpu), (uint64_t) e->ts);
             break;
         }
-
-        //buf.emplace((event_t) {.type = PNT_E, .ts = e->ts, .cpu = cpu});
-        TRACE_EVENT_END("sched", perfetto::Track(cpu), (uint64_t) e->ts);
-        *last_state = PNT_E;
-
-        break;
     }
 }
 
