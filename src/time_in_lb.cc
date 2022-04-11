@@ -18,27 +18,6 @@
 #include "trace_helpers.h"
 #include "time_in_lb.skel.h"
 
-/*
- * As long as BPF map can keep up with the sched event rate, this ringbuf is
- * not necessary.
- */
-//#include "SPSCQueue.h"
-
-#include <time.h>
-
-/* perfetto specific */
-#include <fstream>
-#include "perfetto.h"
-
-PERFETTO_DEFINE_CATEGORIES(
-    perfetto::Category("sched")
-        .SetDescription("CPU Scheduler event"));
-
-/* init static storage for the categories */
-PERFETTO_TRACK_EVENT_STATIC_STORAGE();
-
-/* perfetto specific */
-
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
@@ -47,7 +26,6 @@ PERFETTO_TRACK_EVENT_STATIC_STORAGE();
 
 #define NR_ENTRY_PERCPU (1024 * 512)
 #define EVENT_RINGBUF_SZ (1 << 16)
-#define TRACE_FILENAME "sched_event.pftrace"
 
 /* for full name of these timestamps, refer LB_FUNC_NAME */
 struct prof_entry { /* profiling entry */
@@ -67,8 +45,6 @@ static volatile bool exiting = false;
 static struct time_in_lb_bpf *skel;
 static int nproc;
 static struct result res;
-//static rigtorp::SPSCQueue<event_t> buf(EVENT_RINGBUF_SZ);
-//static int trace_fd;
 static const char *func_name[] = {
     "run_rebalance_domains",
     "nohz_idle_balance",
@@ -83,12 +59,6 @@ static const char *func_name[] = {
     "__schedule",
     "pick_next_task",
 };
-
-/* occupies 2 cachelines so that vars after this won't involve false-sharing
- * either.
- */
-static volatile bool worker_should_exit __attribute__
-    ((aligned(CACHE_LINE_SIZE * 2))) = false ;
 
 static void bump_memlock_rlimit(void)
 {
@@ -155,209 +125,31 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
 {
     const struct lb_event *e = (struct lb_event*) data;
-    //enum lb_ev_type *last_state = &res.cpu_last_state[cpu];
-    cpu++; /* to shift the index to appropriate perfetto track */
-
-    if (e->type & 0x1) { /* end event */
-        TRACE_EVENT_END("sched", perfetto::Track(cpu), (uint64_t) e->ts);
-            if (unlikely(e->type == RRD_E)) /* to bound trigger_load_balance */
-                TRACE_EVENT_END("sched", perfetto::Track(cpu), (uint64_t) e->ts);
-    } else {
-        switch (e->type) {
-        /* TODO is there a way to pass the const funcname with an const array
-         * or somehow? Have tried using const char[], but Perfetto doesn't
-         * accept :( this forces us to use switch-case, which makes the code
-         * lengthy.
-         */
-        case RRD_S:
-            TRACE_EVENT_BEGIN("sched", "run_rebalance_domains", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case NIB_S:
-            TRACE_EVENT_BEGIN("sched", "nohz_idle_balance", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case N_IB_S:
-            TRACE_EVENT_BEGIN("sched", "_nohz_idle_balance", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case RD_S:
-            TRACE_EVENT_BEGIN("sched", "rebalance_domains", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case LB_S:
-            TRACE_EVENT_BEGIN("sched", "load_balance", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case DT_S:
-            TRACE_EVENT_BEGIN("sched", "detach_tasks", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case AT_S:
-            TRACE_EVENT_BEGIN("sched", "attach_tasks", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case ST_S:
-            TRACE_EVENT_BEGIN("sched", "scheduler_tick", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case TTF_S:
-            TRACE_EVENT_BEGIN("sched", "task_tick_fair", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case SCHED_S:
-            TRACE_EVENT_BEGIN("sched", "schedule", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case S_CHED_S:
-            TRACE_EVENT_BEGIN("sched", "__schedule", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case PNT_S:
-            TRACE_EVENT_BEGIN("sched", "pick_next_task", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        case TLB_S:
-            TRACE_EVENT_BEGIN("sched", "trigger_load_balance", perfetto::Track(cpu), (uint64_t) e->ts);
-            break;
-        }
-    }
-}
-
-std::unique_ptr<perfetto::TracingSession> StartTracing() {
-    // The trace config defines which types of data sources are enabled for
-    // recording. In this example we just need the "track_event" data source,
-    // which corresponds to the TRACE_EVENT trace points.
-    perfetto::TraceConfig cfg;
-    cfg.set_duration_ms((uint32_t) 1000 * 180);
-    cfg.set_write_into_file(true);
-    cfg.set_output_path(TRACE_FILENAME);
-    cfg.set_flush_period_ms(250);
-
-    /* TODO currently confused with this knob, the higher it is, the higher the
-     * likelihood calling to TRACE_EVENT_*() would stall. The confusion is,
-     * this knob should have nothing to do with the shmem, what it affects is
-     * the central buffer, which we currently have 2GB for it, i.e., it should
-     * have no affect on the overrun of the shmem buffer.
-     *
-     * It should be noted that if the stall duration is too long, Perfetto
-     * would consider there is a possible deadlock, and stop the application
-     * abnormaly.
-     *
-     * Plus, the flush period should be as longer as possible, since we want
-     * minimal interference to the machine being traced.
-     */
-    cfg.set_file_write_period_ms(3500);
-
-    auto buffer_cfg = cfg.add_buffers();
-    buffer_cfg->set_size_kb(1024 * 1024 * 2);
-    auto ds = cfg.add_data_sources();
-    auto ds_cfg = ds->mutable_config();
-    ds_cfg->set_name("track_event");
-    // ds_cfg->kBufferExhaustedPolicy = perfetto::BufferExhaustedPolicy::kStall;
-
-    auto tracing_session = perfetto::Tracing::NewTrace();
-    tracing_session->Setup(cfg);
-    tracing_session->StartBlocking();
-    return tracing_session;
-}
-
-void StopTracing(std::unique_ptr<perfetto::TracingSession> tracing_session) {
-  // flush track event out of the shmem
-  perfetto::TrackEvent::Flush();
-
-  // Stop tracing and read the trace data.
-  tracing_session->StopBlocking();/*
-  std::vector<char> trace_data(tracing_session->ReadTraceBlocking());
-
-  // Write the result into a file.
-  // Note: To save memory with longer traces, you can tell Perfetto to write
-  // directly into a file by passing a file descriptor into Setup() above.
-  std::ofstream output;
-  output.open("sched_event.pftrace",
-              std::ios::out | std::ios::binary);
-  output.write(&trace_data[0], trace_data.size());
-  output.close();
-*/
-}
-
-std::unique_ptr<perfetto::TracingSession> init_perfetto(void)
-{
-    perfetto::TracingInitArgs args;
-
-    /* must below 32MB, or it's ignored */
-    args.shmem_size_hint_kb = 1024 * 32;
-
-    args.backends = perfetto::kInProcessBackend;
- //   args.
-    perfetto::Tracing::Initialize(args);
-
-    /* init track events */
-    perfetto::TrackEvent::Register();
-
-    return StartTracing();
-}
 
 /*
-static void* buf_consumer(void *d __attribute__((unused)))
-{
-    while (likely(!worker_should_exit)) {
-        do {
-keep_working:
-            auto *e = buf.front();
-
-            if (likely(e != nullptr)) {
-                enum lb_ev_type *last_state = &res.cpu_last_state[e->cpu];
-
-                switch (e->type) {
-                case PNT_S:
-                    TRACE_EVENT_BEGIN("sched", "pick_next_task_fair", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    break;
-                case PNE_S:
-                    TRACE_EVENT_BEGIN("sched", "pick_next_entity", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    break;
-                case PNE_E:
-                    TRACE_EVENT_END("sched", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    break;
-                case PNT_E:
-                    TRACE_EVENT_END("sched", perfetto::Track(e->cpu), (uint64_t) e->ts);
-                    break;
-                }
-
-                buf.pop();
-
-                // it's likely that we have enormous events to process
-                goto keep_working;
-            }
-        } while (likely(!buf.empty()));
-        // FIXME we seldom reach here as the sched events happens very frequent.
-        // Have been considering placing pthread_yield() here, but the manpage
-        // says that it should only be used in sched policies other than
-        // SCHED_OTHERS. Do we have better mechanism for scenario where the
-        // event rate is low?
-
+        if (d_pid[cpu] != e->pid) return;
+        //if (!lat[cpu].s) {exiting = 1; return;}
+        //printf("%ld\n",  e->ts - lat[cpu].s);
+        record_log2(hist_map, e->ts - lat[cpu].s);
+        //lat[cpu].s = 0;
+*/
+        break;
     }
 
-    fprintf(stderr, "worker has stopped\n");
+    return 0;
 }
-*/
+
 int main(int ac, char *av[])
 {
     int err;
     struct perf_buffer *pb = NULL;
     struct perf_buffer_opts pb_opts = {};
-    //pthread_t worker;
 
     //libbpf_set_print(libbpf_print_fn);
-
-    auto tracing_session = init_perfetto();
-    if (tracing_session == nullptr) {
-        fprintf(stderr, "Failed to init perfetto\n");
-        return -1;
-    }
-
-    //pthread_create(&worker, NULL, buf_consumer, NULL);
 
     bump_memlock_rlimit();
 
     nproc = get_nprocs_conf();
-
-    /* rename perfetto track for each CPU */
-    for (int i = 1; i < nproc + 1; i++) {
-        char cpu[] = "CPUXXX"; // 3 digits should do the trick
-        snprintf(cpu, sizeof(cpu), "CPU%d", i - 1);
-        auto desc = perfetto::Track(i).Serialize();
-        desc.set_name(cpu);
-        perfetto::TrackEvent::SetTrackDescriptor(perfetto::Track(i), desc);
-    }
 
 /*
     res.cpu = (prof_entry**) calloc(nproc, sizeof(struct prof_entry *));
@@ -420,10 +212,6 @@ int main(int ac, char *av[])
     while (!exiting) {
         perf_buffer__poll(pb, 100 /* timeout, ms */);
     }
-/*
-    worker_should_exit = true;
-    pthread_join(worker, NULL);
-*/
     /* to timely check BPF_STATS */
     system("../tools/bpftool prog list > bpftool_list_res");
 

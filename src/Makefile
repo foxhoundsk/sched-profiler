@@ -14,7 +14,7 @@ CFLAGS := -Wall -freorder-blocks -lstdc++ -pthread
 COMMON_FLAGS :=
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
-THIRD_PARTY_USER_SRCS := trace_helpers.c perfetto.cc
+THIRD_PARTY_USER_SRCS := trace_helpers.c
 
 APPS = time_in_lb
 
@@ -45,7 +45,7 @@ $(OUTPUT) $(OUTPUT)/libbpf:
 # Build final application
 $(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(THIRD_PARTY_USER_SRCS) | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q) g++ $(CFLAGS) $^ -lelf -lz -o $@
+	$(Q) $(CC) $(CFLAGS) $^ -lelf -lz -o $@
 
 $(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
 
