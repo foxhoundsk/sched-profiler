@@ -10,7 +10,7 @@ INCLUDES := -I$(OUTPUT) -I$(abspath $(LIBBPF_SRC)/../)
 PER_KERN_HEADER := $(OUTPUT)/vmlinux.h
 
 # -freorder-blocks is for the sake of __builtin_expect
-CFLAGS := -Wall -freorder-blocks -lstdc++ -pthread
+CFLAGS := -Wall -freorder-blocks
 COMMON_FLAGS :=
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
