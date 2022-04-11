@@ -80,6 +80,9 @@ enum lb_ev_type {
 struct lb_event {
     enum lb_ev_type type;
     long ts;
+    int mtype;
+    int cpu;
+    int pid;
 };
 
 /*

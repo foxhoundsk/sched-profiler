@@ -41,6 +41,7 @@ struct result {
     int *nr_cpu_ev;
 };
 
+int hist_map[HIST_MAP_BUCKET_SZ] = {};
 static volatile bool exiting = false;
 static struct time_in_lb_bpf *skel;
 static int nproc;
@@ -93,8 +94,8 @@ static void record_log2(int *hist_map, unsigned delta)
 static inline void report_log2(int *hist_map)
 {
     fprintf(stderr, "\nTIME(ns)\t HITCOUNT\n");
-    for (int i = 0; i < HIST_MAP_BUCKET_SZ; i++) {
-        fprintf(stderr, "%5d -> %5d: %5d\n", 1 << i, 1 << (i + 1), hist_map[i]);
+    for (unsigned long i = 0; i < HIST_MAP_BUCKET_SZ; i++) {
+        fprintf(stderr, "%8lu -> %8lu: %5d\n", (unsigned long)1 << i, (unsigned long)1 << (i + 1), hist_map[i]);
     }
 }
 /*
@@ -121,11 +122,19 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 {
         return vfprintf(stderr, format, args);
 }
-
-static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
+int d_pid[16] = {13, 25, 32, 39, 46, 53, 60, 67, 74, 81, 88, 95, 102, 109, 116, 123};
+struct {
+    long s;
+} lat[16] = {};
+static int ringbuf_cb(void *ctx, void *data, size_t size)
 {
     const struct lb_event *e = (struct lb_event*) data;
 
+    switch (e->type) {
+    case TLB_S:
+        lat[e->cpu].s = e->ts;
+        break;
+    case AT_S:
 /*
         if (d_pid[cpu] != e->pid) return;
         //if (!lat[cpu].s) {exiting = 1; return;}
@@ -142,8 +151,7 @@ static void perfbuf_cb(void *ctx, int cpu, void *data, unsigned int data_sz)
 int main(int ac, char *av[])
 {
     int err;
-    struct perf_buffer *pb = NULL;
-    struct perf_buffer_opts pb_opts = {};
+    struct ring_buffer *rb;
 
     //libbpf_set_print(libbpf_print_fn);
 
@@ -190,14 +198,57 @@ int main(int ac, char *av[])
         return -1;
     }
 
-    pb_opts.sample_cb = perfbuf_cb;
-    pb = perf_buffer__new(bpf_map__fd(skel->maps.pb), 1024 /* 16KB per CPU */,
-                          &pb_opts);
-    err = libbpf_get_error(pb);
-    if (err) {
-        fprintf(stderr, "Failed to create perf buffer\n");
+    rb = ring_buffer__new(bpf_map__fd(skel->maps.rb1), ringbuf_cb, NULL, NULL);
+    if (!rb) {
+        err = -1;
+        fprintf(stderr, "Failed to create ring buffer\n");
         goto cleanup;
     }
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb2),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb3),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb4),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb5),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb6),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb7),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb8),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb9),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb10),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb11),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb12),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb13),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb14),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb15),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
+    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb16),
+                              ringbuf_cb, NULL);
+    if (err) goto ringbuf_fail;
 
     err = time_in_lb_bpf__attach(skel);
     if (err) {
@@ -210,8 +261,10 @@ int main(int ac, char *av[])
     __atomic_store_n(&skel->bss->start_tracing, 1, __ATOMIC_RELEASE);
 
     while (!exiting) {
-        perf_buffer__poll(pb, 100 /* timeout, ms */);
+        err = ring_buffer__poll(rb, -1 /* timeout, ms */);
     }
+    report_log2(hist_map);
+
     /* to timely check BPF_STATS */
     system("../tools/bpftool prog list > bpftool_list_res");
 
@@ -221,7 +274,7 @@ int main(int ac, char *av[])
 
 cleanup:
     time_in_lb_bpf__destroy(skel);
-    perf_buffer__free(pb);
+    ring_buffer__free(rb);
 /*
     for (int i = 0; i < nproc; i++)
         free(res.cpu[i]);
@@ -230,10 +283,14 @@ cleanup:
     free(res.cpu_last_state);
     free(res.nr_cpu_ev);
 
-    StopTracing(std::move(tracing_session));
-
-    //close(trace_fd);
-
     return err < 0 ? -err : 0;
+
+ringbuf_fail:
+    time_in_lb_bpf__destroy(skel);
+    ring_buffer__free(rb);
+    free(res.cpu_last_state);
+    free(res.nr_cpu_ev);
+    fprintf(stderr, "Failed to call ring_buffer__add\n");
+    return -1;
 }
 
