@@ -80,6 +80,12 @@ static void sig_handler(int sig)
     exiting = true;
 }
 
+static void sig_alarm_handler(int sig)
+{
+    fprintf(stderr, "\nalarm fired, doing post-processing...\n");
+    exiting = true;
+}
+
 /* it's fine to truncate @delta, as it should not exceed 32-bit */
 static void record_log2(int *hist_map, unsigned delta)
 {
@@ -154,6 +160,15 @@ int main(int ac, char *av[])
     struct ring_buffer *rb;
 
     //libbpf_set_print(libbpf_print_fn);
+
+    /* alarm setup */
+    if (ac == 2) {
+        if (alarm(atoi(av[1]))) {
+            fprintf(stderr, "Failed to set alarm\n");
+            exit(-1);
+        }
+        signal(SIGALRM, sig_alarm_handler);
+    }
 
     bump_memlock_rlimit();
 
