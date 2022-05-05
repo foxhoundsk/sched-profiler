@@ -45,7 +45,7 @@ $(OUTPUT) $(OUTPUT)/libbpf:
 # Build final application
 $(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(THIRD_PARTY_USER_SRCS) | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q) $(CC) $(CFLAGS) $^ -lelf -lz -o $@
+	$(Q) g++ $(CFLAGS) $^ -lelf -lz -o $@
 
 $(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
 
