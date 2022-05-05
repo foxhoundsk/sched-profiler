@@ -426,11 +426,7 @@ cleanup:
     return err < 0 ? -err : 0;
 
 ringbuf_fail:
-    time_in_lb_bpf__destroy(skel);
-    ring_buffer__free(rb);
-    free(res.cpu_last_state);
-    free(res.nr_cpu_ev);
     fprintf(stderr, "Failed to call ring_buffer__add\n");
-    return -1;
+    goto cleanup;
 }
 
