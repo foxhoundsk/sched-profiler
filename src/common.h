@@ -80,9 +80,14 @@ enum lb_ev_type {
 struct lb_event {
     enum lb_ev_type type;
     long ts;
-    int mtype;
+    union {
+        char comm[10];
+        int pid;
+    };
+
     int cpu;
-    int pid;
+    int prev_pid;
+    unsigned int prev_state;
 };
 
 /*
@@ -106,5 +111,54 @@ static unsigned int to_log2(unsigned int v)
 	r |= (v >> 1);
 	return r;
 }
+
+/* TODO use codegen to simplify this ugly macro... */
+#define add_rb() do { \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb2), \
+                              ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb3), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb4), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb5), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb6), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb7), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb8), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb9), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb10), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb11), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb12), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb13), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb14), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb15), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+        err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb16), \
+                                  ringbuf_cb, NULL); \
+        if (err) goto ringbuf_fail; \
+    } while (0)
 
 #endif /* __COMMON_H */

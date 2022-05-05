@@ -10,6 +10,9 @@
 #include <assert.h>
 #include <pthread.h>
 
+/* cross-BPF pid accounting */
+#include <unordered_map>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -131,16 +134,180 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 int d_pid[16] = {13, 25, 32, 39, 46, 53, 60, 67, 74, 81, 88, 95, 102, 109, 116, 123};
 struct {
     long s;
+    int cpu;
+    bool sched_softirq_set;
 } lat[16] = {};
+static int count = 0;
+static long jitter = 0;
+static long jitter_min = 10000000000;
+//static long tasks[2] = {};
+
+/*
+struct task_entry {
+    long ts;
+    bool migrated;
+};*/
+
+/* brought from the kernel */
+#define TASK_RUNNING			0x0000
+
+static std::unordered_map<int, long> tasks;
+
 static int ringbuf_cb(void *ctx, void *data, size_t size)
 {
     const struct lb_event *e = (struct lb_event*) data;
 
     switch (e->type) {
+    case PNT_S:
+long delta;
+        /* prev task still in rq, record its awaiting time */
+        if (likely(e->prev_pid && e->prev_state == TASK_RUNNING)) {
+            printf("%ld cpu%2d %d\n", e->ts, e->cpu, e->prev_pid);
+            tasks[e->prev_pid] = e->ts;
+        }
+        if (likely(e->pid)) {
+            delta = e->ts - tasks[e->pid];
+            if (unlikely(delta < 0))
+                fprintf(stderr, "%ld cpu%d pid:%d\n", delta, e->cpu, e->pid);
+            printf("%ld %d\n", delta, e->pid);
+        }
+        break;
+    case AT_E:
+        tasks[e->pid] = e->ts;
+            printf("%ld cpu%2d %d\n", e->ts, e->cpu, e->pid);
+        break;
     case TLB_S:
+        tasks[e->pid] = e->ts;
+            printf("%ld cpu%2d %d\n", e->ts, e->cpu, e->pid);
+        break;
+/*
+    case AT_E:
         lat[e->cpu].s = e->ts;
         break;
+    case TLB_S:
+        printf("%ld\n", e->ts - lat[e->cpu].s);
+        break;
+*/
+/* softirq lat.
+    case S_CHED_S:
+        if (e->pid != d_pid[e->cpu]) {
+            printf("%ld CPU%2d, switch to pid:%d\n", e->ts, e->cpu, e->pid);
+            break;
+        }
+        printf("%ld CPU%2d, switch to softirqd\n", e->ts, e->cpu);
+        break;
+    case TLB_S:
+        lat[e->cpu].s = e->ts;
+        //lat[e->cpu].sched_softirq_set = true;
+        printf("%ld CPU%2d raised: %d\n", e->ts, e->cpu, e->pid);
+        break;
+    case DT_S:
+        //if (!lat[e->cpu].sched_softirq_set)
+          //  break;
+        //lat[e->cpu].sched_softirq_set = false;
+        break;
     case AT_S:
+        //if (!lat[e->cpu].sched_softirq_set)
+          //  break;
+        //if (likely(e->pid != d_pid[e->cpu]))
+          //  break;
+        //lat[e->cpu].sched_softirq_set = false;
+        if (e->pid == 7)
+            printf("%ld CPU%2d SCHED_SOFTIRQ delta: %ld\n", e->ts, e->cpu, e->ts - lat[e->cpu].s);
+        printf("%ld CPU%2d, enter SOFTIRQ: %d\n", e->ts, e->cpu, e->pid);
+        break;
+    case AT_E:
+        printf("%ld CPU%2d, exit SOFTIRQ: %d\n", e->ts, e->cpu, e->pid);
+        break;
+*/
+/* adaptive LB
+    case PNT_S:
+        if (e->pid == 889)
+            tasks[0] = e->ts;
+        else
+            tasks[1] = e->ts;
+        break;
+    case RRD_S:
+        long delta = e->ts - (e->pid == 889 ? tasks[0] : tasks[1]);
+        if (delta < 1000000000 && delta > jitter)
+            jitter = delta;
+        if (delta < 1000000000 && delta < jitter)
+            jitter_min = delta;
+
+        break;
+*/
+
+/* adaptive LB
+    case RRD_S:
+        printf("%ld CPU%2d disable\n", e->ts, e->cpu);
+        break;
+    case PNT_S:
+        printf("%ld CPU%2d enable\n", e->ts, e->cpu);
+        break;
+    case TTF_S:
+        printf("%ld CPU%2d current avg_load: %ld, total_cap: %ld\n", e->ts, e->cpu, e->avg_load, e->total_cap);
+        break;
+*/
+
+/*
+    case TLB_S:
+        printf("%ld CPU%2d, to cpu: %d,comm: %10s\n", e->ts, e->cpu, e->to_cpu, e->comm);
+        break;
+    case RD_S:
+        lat[e->cpu].s = e->ts;
+        lat[e->cpu].cpu = e->to_cpu;
+        printf("%ld CPU%2d src_cpu: %d, pid: %d\n", e->ts, e->cpu, e->to_cpu, e->pid);
+        break;
+    case RD_E:
+        printf("%ld CPU%2d b_group_t: %d i_group_t: %d\n", e->ts, e->cpu, e->pid, e->mtype);
+        break;
+    case NIB_E:
+        printf("%ld CPU%2d SD_SHARE_CPUCAPACITY\n", e->ts, e->cpu);
+        break;
+    case RRD_S:
+     //   if (abs(lat[e->cpu].cpu - e->to_cpu) != 8)
+       //     break;
+        //printf("%ld\n", e->ts - lat[e->cpu].s);
+        if (e->pid == 927 || e->pid == 926)
+            count++;
+        break;
+*/
+/* trace LB softirq lat.
+    case TLB_S:
+        lat[e->cpu].s = e->ts;
+        //lat[e->cpu].sched_softirq_set = true;
+        break;
+    case DT_S:
+        if (!lat[e->cpu].sched_softirq_set)
+            break;
+        lat[e->cpu].sched_softirq_set = false;
+        break;
+    case AT_S:
+        //if (!lat[e->cpu].sched_softirq_set)
+          //  break;
+        //if (likely(e->pid != d_pid[e->cpu]))
+          //  break;
+        printf("%ld\n", e->ts - lat[e->cpu].s);
+        //lat[e->cpu].sched_softirq_set = false;
+        break;
+//-----------------------------
+    case TLB_S:
+        lat[e->cpu].s = e->ts;
+        lat[e->cpu].sched_softirq_set = true;
+        break;
+    case DT_S:
+//        printf("%ld\n", e->ts - lat[e->cpu].s);
+        break;
+    case AT_S:
+        if (!lat[e->cpu].sched_softirq_set)
+            break;
+        if (likely(e->pid != d_pid[e->cpu]))
+            break;
+        assert(lat[e->cpu].s);
+        printf("%ld\n", e->ts - lat[e->cpu].s);
+        lat[e->cpu].sched_softirq_set = false;
+        break;
+*/
 /*
         if (d_pid[cpu] != e->pid) return;
         //if (!lat[cpu].s) {exiting = 1; return;}
@@ -148,7 +315,6 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         record_log2(hist_map, e->ts - lat[cpu].s);
         //lat[cpu].s = 0;
 */
-        break;
     }
 
     return 0;
@@ -169,6 +335,8 @@ int main(int ac, char *av[])
         }
         signal(SIGALRM, sig_alarm_handler);
     }
+
+    signal(SIGINT, sig_handler);
 
     bump_memlock_rlimit();
 
@@ -219,51 +387,7 @@ int main(int ac, char *av[])
         fprintf(stderr, "Failed to create ring buffer\n");
         goto cleanup;
     }
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb2),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb3),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb4),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb5),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb6),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb7),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb8),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb9),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb10),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb11),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb12),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb13),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb14),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb15),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
-    err = ring_buffer__add(rb, bpf_map__fd(skel->maps.rb16),
-                              ringbuf_cb, NULL);
-    if (err) goto ringbuf_fail;
+    add_rb();
 
     err = time_in_lb_bpf__attach(skel);
     if (err) {
@@ -271,13 +395,14 @@ int main(int ac, char *av[])
         goto cleanup;
     }
 
-    signal(SIGINT, sig_handler);
 
     __atomic_store_n(&skel->bss->start_tracing, 1, __ATOMIC_RELEASE);
 
     while (!exiting) {
         err = ring_buffer__poll(rb, -1 /* timeout, ms */);
     }
+    fprintf(stderr, "migration count: %d\n", count);
+    fprintf(stderr, "jitter: %ld, jitter_min: %ld, jitter: %ld\n", jitter, jitter_min, jitter - jitter_min);
     report_log2(hist_map);
 
     /* to timely check BPF_STATS */
