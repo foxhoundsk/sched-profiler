@@ -2,7 +2,7 @@
 ## Build
 Grab the submodule:
 ```
-$ git submodule update --init --recursive
+$ git submodule update --init
 ```
 
 Switch to directory `src/`, and simply build the project with `make` command.
