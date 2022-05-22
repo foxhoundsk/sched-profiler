@@ -135,6 +135,7 @@ int d_pid[16] = {13, 25, 32, 39, 46, 53, 60, 67, 74, 81, 88, 95, 102, 109, 116, 
 struct {
     long s;
     int cpu;
+    long t;
     bool sched_softirq_set;
 } lat[16] = {};
 static int count = 0;
@@ -147,39 +148,213 @@ struct task_entry {
     long ts;
     bool migrated;
 };*/
-
+static struct {
+    long de_s;
+    long de_e;
+    long at_s;
+} cpu[16] = {};
+int tpid[8] = {9563, 9564, 9565,9566,9567,9568,9568,9570};
 /* brought from the kernel */
 #define TASK_RUNNING			0x0000
 
 static std::unordered_map<int, long> tasks;
-
+static int dup_cnt = 0;
+static int cor_cnt = 0;
 static int ringbuf_cb(void *ctx, void *data, size_t size)
 {
     const struct lb_event *e = (struct lb_event*) data;
 
     switch (e->type) {
+    long delta;
+    case N_IB_E:
+        lat[e->cpu].s = e->ts;
+        //printf("RAISE cpu%2d %ld\n", e->cpu, e->ts);
+        if (lat[e->cpu].t > e->ts) {
+            delta = lat[e->cpu].t - e->ts;
+            if (delta > 3000000)
+                fprintf(stderr, "%ld\n", delta);
+            assert(delta >= 0);
+            printf("%ld\n", delta);
+            lat[e->cpu].t = -1;
+        }
+        break;
+    case N_IB_S:
+        //printf("NORM  cpu%2d %ld\n", e->cpu, e->ts - lat[e->cpu].s);
+        if (lat[e->cpu].s == -1) {
+            if (lat[e->cpu].t != -1) {
+                fprintf(stderr, "duplicated\n");
+            }
+            lat[e->cpu].t = e->ts;
+            break;
+        }
+        delta = e->ts - lat[e->cpu].s;
+        assert(delta >= 0);
+        printf("%ld\n", delta);
+        lat[e->cpu].s = -1;
+        break;
+    case PNT_S:
+        if (lat[e->ccpu].s == -1) {
+            if (lat[e->ccpu].t != -1) {
+                fprintf(stderr, "duplicated\n");
+            }
+            lat[e->ccpu].t = e->ts;
+            break;
+        }
+        delta = e->ts - lat[e->ccpu].s;
+        assert(delta >= 0);
+        printf("%ld\n", delta);
+        lat[e->ccpu].s = -1;
+        break;
+/* task migration overhead
+    case RD_S:
+        cpu[e->cpu].de_s = e->ts;
+        break;
+    case PNT_S:
+        cpu[e->cpu].de_e = e->ts;
+        break;
+    case AT_E:
+        cpu[e->cpu].at_s = e->ts;
+        break;
+    case DT_S:
+        printf("%ld\n", (cpu[e->cpu].de_e - cpu[e->cpu].de_s) + (e->ts - cpu[e->cpu].at_s));
+        break;
+*/
+// kthread execution time
+/*
+    case PNT_S:
+        long delta;
+        // prev task still in rq, record its awaiting time
+        if (e->prev_pid != -1) {
+            //printf("%ld cpu%2d %d PUT\n", e->ts, e->cpu, e->prev_pid);
+
+            if (unlikely(tasks.end() == tasks.find(e->prev_pid)))
+                goto skip;
+
+            delta = e->ts - tasks[e->prev_pid];
+            printf("%ld\n", delta);
+            tasks.erase(e->prev_pid);
+        }
+skip:
+        if (e->pid == -1)
+            break;
+
+        tasks[e->pid] = e->ts;
+        //if (unlikely(delta > 1000000000))
+        //    fprintf(stderr, "%ld cpu%d pid:%d\n", delta, e->cpu, e->pid);
+        //printf("%ld %ld cpu%2d %d\n", e->ts, delta, e->cpu, e->pid);
+        break;
+*/
+// sched. lat (for all tasks on the machine)
+/*
     case PNT_S:
 long delta;
-        /* prev task still in rq, record its awaiting time */
+        // prev task still in rq, record its awaiting time
         if (likely(e->prev_pid && e->prev_state == TASK_RUNNING)) {
-            printf("%ld cpu%2d %d\n", e->ts, e->cpu, e->prev_pid);
-            tasks[e->prev_pid] = e->ts;
+            //printf("%ld cpu%2d %d PUT\n", e->ts, e->cpu, e->prev_pid);
+                tasks[e->prev_pid] = e->ts;
         }
+
+        if (unlikely(tasks.end() == tasks.find(e->pid)))
+            break;
         if (likely(e->pid)) {
-            delta = e->ts - tasks[e->pid];
-            if (unlikely(delta < 0))
-                fprintf(stderr, "%ld cpu%d pid:%d\n", delta, e->cpu, e->pid);
-            printf("%ld %d\n", delta, e->pid);
+                delta = e->ts - tasks[e->pid];
+                tasks.erase(e->pid);
+
+                // it's possible that a cross-CPU wakeup wakes an already queued
+                // task, in which case we might get negative time delta because
+                // the task has already running.  Drop such event.
+                
+                if (unlikely(delta < 0)) {
+                    fprintf(stderr, "negative: %ld\n", delta);
+                    exit(-1);
+                }
+                
+                //assert(delta > 0);
+
+                //if (unlikely(delta > 1000000000))
+                //    fprintf(stderr, "%ld cpu%d pid:%d\n", delta, e->cpu, e->pid);
+                //printf("%ld %ld cpu%2d %d\n", e->ts, delta, e->cpu, e->pid);
+                printf("%ld\n", delta);
+                break;
         }
         break;
     case AT_E:
-        tasks[e->pid] = e->ts;
-            printf("%ld cpu%2d %d\n", e->ts, e->cpu, e->pid);
+        // prevent sched_ttwu_pending() from doing false-positive wakeup
+        if (tasks.end() == tasks.find(e->pid)) {
+            tasks[e->pid] = e->ts;
+            break;
+            //printf("%ld cpu%2d pid: %d, flag:%x NEW\n", e->ts, e->cpu, e->pid);
+        }
         break;
     case TLB_S:
-        tasks[e->pid] = e->ts;
-            printf("%ld cpu%2d %d\n", e->ts, e->cpu, e->pid);
+        if (tasks.end() == tasks.find(e->pid)) {
+            tasks[e->pid] = e->ts;
+            break;
+            //printf("%ld cpu%2d pid: %d, WAKE\n", e->ts, e->cpu, e->pid);
+        }
         break;
+*/
+// scheduling lat.
+/*
+    case PNT_S:
+        long delta;
+        if (likely(e->prev_pid && e->prev_state == TASK_RUNNING)) {
+            //printf("%ld cpu%2d %d PUT\n", e->ts, e->cpu, e->prev_pid);
+            for (int i = 0; i < 8; i++) {
+                if (tpid[i] != e->prev_pid)
+                    continue;
+                tasks[e->prev_pid] = e->ts;
+                break;
+            }
+        }
+
+        if (unlikely(tasks.end() == tasks.find(e->pid)))
+            break;
+        if (likely(e->pid)) {
+            for (int i = 0; i < 8; i++) {
+                if (tpid[i] != e->pid)
+                    continue;
+                delta = e->ts - tasks[e->pid];
+                tasks.erase(e->pid);
+
+                if (unlikely(delta < 0))
+                    return 0;
+                    //break;
+
+                //if (unlikely(delta > 1000000000))
+                //    fprintf(stderr, "%ld cpu%d pid:%d\n", delta, e->cpu, e->pid);
+                //printf("%ld %ld cpu%2d %d\n", e->ts, delta, e->cpu, e->pid);
+                printf("%ld\n", delta);
+                return 0;
+            }
+        }
+        break;
+    case AT_E:
+        for (int i = 0; i < 8; i++) {
+            if (tpid[i] != e->pid)
+                continue;
+            if (tasks.end() == tasks.find(e->pid)) {
+                tasks[e->pid] = e->ts;
+                return 0; // XXX
+                //printf("%ld cpu%2d pid: %d, flag:%x NEW\n", e->ts, e->cpu, e->pid);
+            }
+        }
+        break;
+    case TLB_S:
+        for (int i = 0; i < 8; i++) {
+            if (tpid[i] != e->pid)
+                continue;
+            if (tasks.end() == tasks.find(e->pid)) {
+                tasks[e->pid] = e->ts;
+                return 0;
+                //printf("%ld cpu%2d pid: %d, WAKE\n", e->ts, e->cpu, e->pid);
+            }
+        }
+        break;
+    case DT_S:
+        tasks.erase(e->pid);
+        break;
+*/
 /*
     case AT_E:
         lat[e->cpu].s = e->ts;
@@ -402,6 +577,8 @@ int main(int ac, char *av[])
         err = ring_buffer__poll(rb, -1 /* timeout, ms */);
     }
     fprintf(stderr, "migration count: %d\n", count);
+    fprintf(stderr, "dup_cnt: %d\n", dup_cnt);
+    fprintf(stderr, "cor_cnt: %d\n", cor_cnt);
     fprintf(stderr, "jitter: %ld, jitter_min: %ld, jitter: %ld\n", jitter, jitter_min, jitter - jitter_min);
     report_log2(hist_map);
 

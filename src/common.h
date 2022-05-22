@@ -81,13 +81,14 @@ struct lb_event {
     enum lb_ev_type type;
     long ts;
     union {
-        char comm[10];
-        int pid;
+        char comm[7];
     };
-
+    int pid;
     int cpu;
-    int prev_pid;
-    unsigned int prev_state;
+    int ccpu;
+    //int prev_pid;
+    //char p_comm[7];
+    unsigned prev_state;
 };
 
 /*
