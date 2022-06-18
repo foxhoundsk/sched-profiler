@@ -5,9 +5,9 @@ Grab the submodule:
 $ git submodule update --init
 ```
 
-Switch to directory `src/`, and simply build the project with `make` command.
+Switch to directory `src/`, and build the project with command `make`.
 
-Make sure that you have LLVM and Clang installed, which are required to build the BPF program.
+Make sure that you have LLVM and Clang installed, which are required for building BPF programs.
 
 ## Known issues
 - bpftool
