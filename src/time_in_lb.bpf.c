@@ -33,6 +33,23 @@ struct {
         __type(value, struct lb_event);
 } map SEC(".maps");
 */
+
+/*
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, cputime_t);
+} cpu_time SEC(".maps");
+*/
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, sched_lat_t);
+} sched_lat_map SEC(".maps");
+
 struct ringbuf_map {
         __uint(type, BPF_MAP_TYPE_RINGBUF);
         __uint(max_entries, 2 * 1024 * 1024 /* 2MB */); 
