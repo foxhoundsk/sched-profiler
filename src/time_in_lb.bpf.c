@@ -6,9 +6,6 @@
 
 #include "common.h"
 
-#define likely(x)       __builtin_expect((x),1)
-#define unlikely(x)     __builtin_expect((x),0)
-
 /* sched BPF requires this */
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 

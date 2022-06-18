@@ -21,9 +21,6 @@
 #include "trace_helpers.h"
 #include "time_in_lb.skel.h"
 
-#define likely(x)       __builtin_expect((x),1)
-#define unlikely(x)     __builtin_expect((x),0)
-
 /* TODO add this to cmdline option */
 #define EVENT_THRES     5000
 

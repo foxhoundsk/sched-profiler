@@ -12,6 +12,9 @@
 #define CACHE_LINE_SIZE 64
 #define __cacheline_aligned __attribute__ ((aligned(CACHE_LINE_SIZE)))
 
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+
 struct rq_event {
     int pid;
     long time_ns;
