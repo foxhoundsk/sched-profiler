@@ -26,6 +26,7 @@
 
 #define NR_ENTRY_PERCPU (1024 * 512)
 #define EVENT_RINGBUF_SZ (1 << 16)
+#define SCHED_LAT_DIVIDER 80
 
 /* for full name of these timestamps, refer LB_FUNC_NAME */
 struct prof_entry { /* profiling entry */
@@ -151,17 +152,67 @@ static struct {
     long at_s;
 } cpu[16] = {};
 int tpid[8] = {9563, 9564, 9565,9566,9567,9568,9568,9570};
+
 /* brought from the kernel */
 #define TASK_RUNNING			0x0000
 
 static std::unordered_map<int, long> tasks;
 static int dup_cnt = 0;
 static int cor_cnt = 0;
+static double jitterdeb_avgs = 0;
+static double stressor_avgs = 0;
 static int ringbuf_cb(void *ctx, void *data, size_t size)
 {
-    const struct lb_event *e = (struct lb_event*) data;
+    // cputime
+    //printf("pid: %d, comm: %16s, cputime: %ld\n", e->pid, e->comm, e->sum);
 
-    switch (e->type) {
+// HRTICK delta (obtained through custom tp)
+    const hrtick_map_t *e = (hrtick_map_t*) data;
+    if (e->delta >= 0)
+        printf("%ld\n", e->delta);
+
+/*
+//  hrtick vs CFS on scheduling lat.
+//  const sched_lat_map_t *e = (sched_lat_map_t*) data;
+//  double avg;
+    if (!strncmp(e->comm, "jitterdebugger", TASK_COMM_LEN)) {
+        avg = (double)e->sum / e->cnt;
+
+        if (avg > (double) 1000) {
+            printf("pid: %d, comm: %16s, nr_scheduled: %6ld, avg. lat: %lf ns\n",
+                   e->pid, e->comm, e->cnt, avg);
+            return 0;
+        }
+
+        jitterdeb_avgs += avg;
+        printf("jitterdebugger: %lf added\n", avg);
+    } else if (!strncmp(e->comm, "stress", TASK_COMM_LEN)) {
+        avg = (double)e->sum / e->cnt;
+
+        if (avg < (double) 10000) {
+            printf("pid: %d, comm: %16s, nr_scheduled: %6ld, avg. lat: %lf ns\n",
+                   e->pid, e->comm, e->cnt, avg);
+            return 0;
+        }
+
+        stressor_avgs += avg;
+        printf("stress: %lf added\n", avg);
+    } else
+        return 0; // other tasks
+
+    printf("pid: %d, comm: %16s, nr_scheduled: %6ld, avg. lat: %lf ns\n",
+           e->pid, e->comm, e->cnt, avg);
+*/
+   // switch (e->type) {
+/* wakeup overhead
+    case N_IB_E:
+        lat[e->cpu].s = e->ts;
+        break;
+    case N_IB_S:
+        printf("%ld\n", e->ts - lat[e->cpu].s);
+        break;
+*/
+/* lb chaining, softirq handling latency
     long delta;
     case N_IB_E:
         lat[e->cpu].s = e->ts;
@@ -202,6 +253,7 @@ static int ringbuf_cb(void *ctx, void *data, size_t size)
         printf("%ld\n", delta);
         lat[e->ccpu].s = -1;
         break;
+*/
 /* task migration overhead
     case RD_S:
         cpu[e->cpu].de_s = e->ts;
@@ -487,7 +539,7 @@ long delta;
         record_log2(hist_map, e->ts - lat[cpu].s);
         //lat[cpu].s = 0;
 */
-    }
+//    }
 
     return 0;
 }
@@ -577,7 +629,10 @@ int main(int ac, char *av[])
     fprintf(stderr, "dup_cnt: %d\n", dup_cnt);
     fprintf(stderr, "cor_cnt: %d\n", cor_cnt);
     fprintf(stderr, "jitter: %ld, jitter_min: %ld, jitter: %ld\n", jitter, jitter_min, jitter - jitter_min);
-    report_log2(hist_map);
+    //report_log2(hist_map);
+    fprintf(stderr, "jitterdebugger avg. sched latency: %lf ns\n", jitterdeb_avgs / nproc);
+    fprintf(stderr, "stress-ng avg. sched latency: %lf ns\n", stressor_avgs / SCHED_LAT_DIVIDER);
+    fprintf(stderr, "stress-ng result divider: %d\n", SCHED_LAT_DIVIDER);
 
     /* to timely check BPF_STATS */
     system("../tools/bpftool prog list > bpftool_list_res");

@@ -80,6 +80,39 @@ enum lb_ev_type {
     NR_EVENT,
 };
 
+#define TASK_COMM_LEN 16
+struct hrtick_map {
+    long delta;
+    char comm[TASK_COMM_LEN];
+};
+typedef struct hrtick_map hrtick_map_t;
+struct cputime_map {
+    char comm[TASK_COMM_LEN];
+    pid_t pid;
+    long sum;
+};
+typedef struct cputime_map bpf_map_t;
+
+struct cputime {
+    long ts;
+    long sum;
+};
+typedef struct cputime cputime_t;
+
+struct sched_lat_map {
+    char comm[TASK_COMM_LEN];
+    pid_t pid;
+    unsigned long sum;
+    long cnt;
+};
+typedef struct sched_lat_map sched_lat_map_t;
+struct sched_lat {
+    long cnt; // nr times scheduled
+    long ts;
+    unsigned long sum;
+};
+typedef struct sched_lat sched_lat_t;
+
 struct lb_event {
     enum lb_ev_type type;
     long ts;

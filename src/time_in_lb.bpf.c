@@ -108,6 +108,180 @@ struct sched_switch_args {
 	int next_prio;
 };
 
+#define TASK_RUNNING 0
+/* cputime calculation
+__always_inline
+static int trace_enqueue(struct task_struct *t)
+{
+    u32 pid = t->pid;
+    cputime_t *ptr;
+
+    if (!pid)
+        return 0;
+
+    // create local storage at early stage, saving overhead in hotpath
+    bpf_task_storage_get(&cpu_time, t, NULL,
+                               BPF_LOCAL_STORAGE_GET_F_CREATE);
+
+    return 0;
+}
+
+__always_inline
+static void trace_prev_task(struct task_struct *t)
+{
+    cputime_t *p;
+
+    p = bpf_task_storage_get(&cpu_time, t, NULL, 0);
+
+    if (!p)
+            return;
+
+    // sum cputime for this turn of execution
+    p->sum += bpf_ktime_get_ns() - p->ts;
+}
+
+SEC("tp_btf/sched_wakeup")
+int handle__sched_wakeup(u64 *ctx)
+{
+    // TP_PROTO(struct task_struct *p)
+    struct task_struct *p = (struct task_struct *)ctx[0];
+
+    return trace_enqueue(p);
+}
+
+SEC("tp_btf/sched_wakeup_new")
+int handle__sched_wakeup_new(u64 *ctx)
+{
+    // TP_PROTO(struct task_struct *p)
+    struct task_struct *p = (struct task_struct *)ctx[0];
+
+    return trace_enqueue(p);
+}
+
+SEC("tp_btf/sched_switch")
+int handle__sched_switch(u64 *ctx)
+{
+    // TP_PROTO(bool preempt, struct task_struct *prev,
+    // 	    struct task_struct *next)
+
+    struct task_struct *prev = (struct task_struct *)ctx[1];
+    struct task_struct *next = (struct task_struct *)ctx[2];
+    cputime_t *tls; // task local storage
+    u64 delta_us;
+    long state;
+    u32 pid;
+
+    // task is retired from cpu, calculate the cputime for this turn
+    if (prev->pid)
+        trace_prev_task(prev);
+
+    pid = next->pid;
+
+    // ignore idle task
+    if (!pid)
+        return 0;
+
+    tls = bpf_task_storage_get(&cpu_time, next, 0, 0);
+    if (!tls)
+        return 0; // missed enqueue
+
+    // timestamp for start of this turn
+    tls->ts = bpf_ktime_get_ns();
+
+    // reserved for future use
+    //bpf_task_storage_delete(&start, next);
+    return 0;
+}
+
+SEC("tp_btf/sched_process_exit")
+int handle__sched_process_exit(u64 *ctx)
+{
+    struct task_struct *t = (struct task_struct *)ctx[0];
+    int cpu = bpf_get_smp_processor_id();
+    cputime_t *tls;
+
+    tls = bpf_task_storage_get(&cpu_time, t, 0, 0);
+    if (!tls)
+        return 0;
+
+    struct bpf_map *rb = bpf_map_lookup_elem(&map_array, &cpu);
+    if (!rb)
+        return 0;
+
+    bpf_map_t *e = bpf_ringbuf_reserve(rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    // sum for last turn
+    tls->sum += bpf_ktime_get_ns() - tls->ts;
+
+    bpf_probe_read(e->comm, TASK_COMM_LEN, t->comm);
+    e->pid = t->pid;
+    e->sum = tls->sum;
+
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+*/
+/* wakeup overhead
+SEC("kretprobe/__wake_up")
+int BPF_KRETPROBE(prog1)
+{
+    if (unlikely(!start_tracing))
+        return 0;
+
+    int cpu = bpf_get_smp_processor_id();
+
+    struct bpf_map *rb = bpf_map_lookup_elem(&map_array, &cpu);
+    if (!rb)
+        return 0;
+
+    struct lb_event *e = bpf_ringbuf_reserve(rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    e->cpu = cpu;
+    e->type = N_IB_S;
+    e->ts = bpf_ktime_get_ns();
+
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+SEC("kprobe/__wake_up")
+int BPF_KPROBE(prog2, struct wait_queue_head *wq_head, unsigned int mode,
+			int nr_exclusive, void *key)
+{
+    if (unlikely(!start_tracing))
+        return 0;
+
+    int cpu = bpf_get_smp_processor_id();
+
+    struct bpf_map *rb = bpf_map_lookup_elem(&map_array, &cpu);
+    if (!rb)
+        return 0;
+
+    struct lb_event *e = bpf_ringbuf_reserve(rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    e->cpu = cpu;
+    e->type = N_IB_E;
+    e->ts = bpf_ktime_get_ns();
+
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+*/
+/*
 SEC("raw_tp/softirq_raise")
 int t12(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -190,7 +364,117 @@ int t53(struct bpf_raw_tracepoint_args *ctx)
 
     return 0;
 }
+*/
+ //HRTICK delta expose
 
+SEC("tp_btf/sched_hrtick")
+int handle__sched_wakeup(u64 *ctx)
+{
+    struct task_struct *p = (struct task_struct *)ctx[1];
+    int cpu = bpf_get_smp_processor_id();
+    struct bpf_map *rb = bpf_map_lookup_elem(&map_array, &cpu);
+    if (!rb)
+        return 0;
+    hrtick_map_t *e = bpf_ringbuf_reserve(rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    e->delta = ctx[0];
+    //bpf_probe_read(e->comm, TASK_COMM_LEN, p->comm);
+
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+
+// sched lat.
+/*
+SEC("tp_btf/sched_switch")
+int handle__sched_switch(u64 *ctx)
+{
+    struct task_struct *p = (struct task_struct *)ctx[2];
+    struct task_struct *prev = (struct task_struct *)ctx[1];
+    sched_lat_t *tls;
+
+    if (prev->pid && prev->__state == TASK_RUNNING) {
+        tls = bpf_task_storage_get(&sched_lat_map, prev, NULL, 0);
+        if (tls)
+            tls->ts = bpf_ktime_get_ns(); // start ts
+    }
+
+    tls = bpf_task_storage_get(&sched_lat_map, p, NULL, 0);
+    if (!tls)
+        return 0;
+
+    tls->cnt++;
+    tls->sum += bpf_ktime_get_ns() - tls->ts;
+
+    return 0;
+}
+SEC("tp_btf/sched_wakeup")
+int handle__sched_wakeup(u64 *ctx)
+{
+    struct task_struct *p = (struct task_struct *)ctx[0];
+    sched_lat_t *tls;
+
+    // record only newly created tasks, which are of interest to us
+    tls = bpf_task_storage_get(&sched_lat_map, p, NULL, 0);
+    if (!tls)
+        return 0;
+
+    tls->ts = bpf_ktime_get_ns();
+
+    return 0;
+}
+
+SEC("tp_btf/sched_wakeup_new")
+int handle__sched_wakeup_new(u64 *ctx)
+{
+    struct task_struct *p = (struct task_struct *)ctx[0];
+    sched_lat_t *tls;
+
+    tls = bpf_task_storage_get(&sched_lat_map, p, NULL,
+                               BPF_LOCAL_STORAGE_GET_F_CREATE);
+    if (!tls)
+        return 0;
+
+    tls->ts = bpf_ktime_get_ns();
+
+    return 0;
+}
+
+SEC("tp_btf/sched_process_exit")
+int handle__sched_process_exit(u64 *ctx)
+{
+    struct task_struct *p = (struct task_struct *)ctx[0];
+    int cpu = bpf_get_smp_processor_id();
+    sched_lat_t *tls;
+
+    tls = bpf_task_storage_get(&sched_lat_map, p, NULL, 0);
+    if (!tls)
+        return 0;
+
+    struct bpf_map *rb = bpf_map_lookup_elem(&map_array, &cpu);
+    if (!rb)
+        return 0;
+    sched_lat_map_t *e = bpf_ringbuf_reserve(rb, sizeof(*e), 0);
+    if (!e) {
+        __sync_fetch_and_add(&dropped, 1);
+        return 0;
+    }
+
+    bpf_probe_read(e->comm, TASK_COMM_LEN, p->comm);
+    e->cnt = tls->cnt;
+    e->sum = tls->sum;
+    e->pid = p->pid;
+
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+*/
 /*
 SEC("raw_tp/sched_switch")
 int t53(struct bpf_raw_tracepoint_args *ctx)
